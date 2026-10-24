@@ -1,0 +1,29 @@
+[Unit]
+Description=netScan home network daemon (own network only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# adjust to where you cloned the repo and created the venv
+WorkingDirectory=/opt/netScan
+Environment=NETSCAN_HOME=/var/lib/netscan
+ExecStart=/opt/netScan/.venv/bin/netscan --accept-terms daemon
+Restart=on-failure
+# exit 2 = refused by the safety checks (allow-list/notice/config); restarting cannot fix that
+RestartPreventExitStatus=2
+RestartSec=10
+# raw sockets (ARP sweep/watch/cutoff, sniffing) need these capabilities; no full root needed
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/netscan
+StateDirectory=netscan
+User=netscan
+Group=netscan
+
+[Install]
+WantedBy=multi-user.target

@@ -113,6 +113,20 @@ def test_api_requires_the_token_but_static_files_do_not(api):
     assert api.get("/app.js", token=None)[0] == 200 and api.get("/style.css", token=None)[0] == 200 and api.get("/help.js", token=None)[0] == 200
 
 
+def test_every_script_the_dashboard_imports_is_served(api):
+    import re
+    seen, todo = set(), ["/app.js"]
+    while todo:
+        path = todo.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        status, body = api.get(path, token=None)
+        assert status == 200, path
+        todo += re.findall(r'from "(/[a-z]+\.js)"', body.decode() if isinstance(body, bytes) else str(body))
+    assert "/identify.js" in seen
+
+
 def test_static_server_serves_only_whitelisted_files(api):
     for path in ("/../../etc/passwd", "/%2e%2e/%2e%2e/etc/passwd", "/netscan/config.py", "/static/app.js", "/app.js/../config.toml"):
         assert api.get(path, token=None)[0] == 404, path

@@ -28,9 +28,12 @@ MAX_PRESENCE_HOURS = 24 * 30
 SECRET_KEYS = ("webhook_url", "ntfy_url", "ntfy_token")
 
 
-def display_name(dev: Device | None, meta: DeviceMeta | None, mac: str = "") -> str:
+def display_name(dev: Device | None, meta: DeviceMeta | None, mac: str = "", found: str = "") -> str:
+    """Your own label, else the name the device announced (Bonjour, UPnP, DHCP...), else what the router calls it."""
     if meta and meta.label:
         return meta.label
+    if found:
+        return found
     if dev:
         return dev.hostname or dev.vendor or dev.mac
     return mac
@@ -109,7 +112,7 @@ class FeatureMixin:
     def device_by_mac(self, mac: str) -> dict:
         blocked = {b.mac: b for b in self.store.list_blocks()}
         dev = self.store.get_device(mac)
-        return self._device_dict(dev, blocked, self.store.traffic_totals(), self._meta_map())  # type: ignore[arg-type]
+        return self._device_dict(dev, blocked, self.store.traffic_totals(), self._meta_map(), self.store.all_info())  # type: ignore[arg-type]
 
     def review(self, body: dict) -> dict:
         """Bulk trust change: mark devices known / guest / unknown in one go."""
@@ -203,9 +206,14 @@ class FeatureMixin:
             "active": r.active, "held": r.held, "next_transition": next_transition(r, now), "warning": warning,
         }
 
+    def _found_map(self) -> dict[str, str]:
+        from netscan.discover.guess import best_name, flat
+
+        return {mac: n for mac, rows in self.store.all_info().items() if (n := best_name(flat(rows))[0])}
+
     def _name_map(self) -> dict[str, str]:
-        metas = self._meta_map()
-        return {d.mac: display_name(d, metas.get(d.mac)) for d in self.store.list_devices()}
+        metas, found = self._meta_map(), self._found_map()
+        return {d.mac: display_name(d, metas.get(d.mac), found=found.get(d.mac, "")) for d in self.store.list_devices()}
 
     def rules(self) -> list[dict]:
         names, now = self._name_map(), self.clock()
@@ -286,7 +294,7 @@ class FeatureMixin:
         hours = max(1.0, min(float(hours), MAX_PRESENCE_HOURS))
         now = self.clock()
         since = now - hours * 3600
-        metas = self._meta_map()
+        metas, found = self._meta_map(), self._found_map()
         offline_after = self.cfg.daemon.offline_after
         devices = []
         for dev in self.store.list_devices():
@@ -296,7 +304,7 @@ class FeatureMixin:
             evs = [(r["ts"], r["kind"]) for r in self.store.events_for_mac(dev.mac)]
             segs = presence_segments(evs, dev.first_seen, since, now, offline_after)
             devices.append({
-                "mac": dev.mac, "name": display_name(dev, meta), "owner": meta.owner if meta else "", "category": meta.category if meta else "",
+                "mac": dev.mac, "name": display_name(dev, meta, found=found.get(dev.mac, "")), "owner": meta.owner if meta else "", "category": meta.category if meta else "",
                 "tracked": bool(meta and meta.track), "online": dev.online, "last_seen": dev.last_seen, "first_seen": dev.first_seen,
                 "segments": segs, "online_seconds": round(sum(s["end"] - s["start"] for s in segs if s["online"])),
             })
@@ -310,18 +318,18 @@ class FeatureMixin:
 
     # --- security
     def security(self) -> dict:
-        metas = self._meta_map()
+        metas, found = self._meta_map(), self._found_map()
         devs = {d.mac: d for d in self.store.list_devices()}
         findings = []
         for r in self.store.events_of_kinds(SECURITY_KINDS, 100):
             row = dict(r)
-            row["name"] = display_name(devs.get(row["mac"]), metas.get(row["mac"]), row["mac"]) if row["mac"] else ""
+            row["name"] = display_name(devs.get(row["mac"]), metas.get(row["mac"]), row["mac"], found.get(row["mac"], "")) if row["mac"] else ""
             findings.append(row)
         scans = []
         for s in self.store.list_port_scans():
             dev = devs.get(s["mac"])
             scans.append({
-                "mac": s["mac"], "ip": dev.ip if dev else s["ip"], "name": display_name(dev, metas.get(s["mac"]), s["mac"]),
+                "mac": s["mac"], "ip": dev.ip if dev else s["ip"], "name": display_name(dev, metas.get(s["mac"]), s["mac"], found.get(s["mac"], "")),
                 "ts": s["ts"], "open": [port_info(p) for p in s["open"]],
             })
         scans.sort(key=lambda s: (-sum(1 for p in s["open"] if p["risk"] == "high"), -len(s["open"]), s["ip"]))
@@ -378,9 +386,30 @@ class FeatureMixin:
         if cancel.is_set():
             return {"devices": 0, "open": 0, "findings": 0, "partial": True}
         events = record_scans(rt, targets, results, self.clock())
+        self._keep_banners(targets, results, cancel)
         rt.alerter.dispatch(events)
         return {
             "devices": len(targets), "open": sum(len(v) for v in results.values()), "findings": len(events),
             "duration": round(time.time() - t0, 1),
         }
 
+
+    def _keep_banners(self, targets: list[tuple[str, str]], results: dict[str, list[int]], cancel: threading.Event) -> None:
+        """A port check that found web or SSH ports also reads their greeting, so the open port says what it is."""
+        prober = getattr(self, "prober", None)
+        if prober is None or cancel.is_set():
+            return
+        ip_of = dict(targets)
+        wanted = {ip_of[mac]: ports for mac, ports in results.items() if mac in ip_of and ports}
+        if not wanted:
+            return
+        mac_of = {ip: mac for mac, ip in targets}
+        try:
+            found = prober.banners(wanted, cancel=cancel)
+        except Exception:  # noqa: BLE001 the port results are already recorded; banners are a bonus
+            log.exception("banner grab failed")
+            return
+        now = self.clock()
+        for ip, data in found.items():
+            if data and ip in mac_of:
+                self.store.set_info(mac_of[ip], "banners", data, now)

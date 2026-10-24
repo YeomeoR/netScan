@@ -91,6 +91,49 @@ class DemoTransport:
         stop.wait()
 
 
+class DemoProber:
+    """Plausible answers for the simulated devices, so the identification screens have something to show."""
+
+    MDNS = {
+        "192.168.77.21": {"hostname": "Nest-Mini-4f2a", "friendly": "Kitchen speaker", "services": ["_googlecast", "_spotify-connect"], "instances": [], "txt": {"md": "Google Nest Mini", "fn": "Kitchen speaker"}, "ports": {}},
+        "192.168.77.23": {"hostname": "Janes-iPhone", "friendly": "", "services": ["_companion-link", "_airplay"], "instances": [], "txt": {"model": "iPhone14,5"}, "ports": {}},
+        "192.168.77.20": {"hostname": "pihole", "friendly": "", "services": ["_ssh", "_http"], "instances": [], "txt": {}, "ports": {}},
+    }
+    SSDP = {
+        GATEWAY.ip: {"server": "Linux/5.4 UPnP/1.1 MiniUPnPd/2.2", "st": ["upnp:rootdevice"], "friendly": "Home router", "manufacturer": "Netgear", "model": "R7000", "device_type": "InternetGatewayDevice"},
+        "192.168.77.22": {"server": "Linux UPnP/1.0", "st": ["upnp:rootdevice"], "friendly": "Echo Dot (Lounge)", "manufacturer": "Amazon", "model": "Echo Dot", "device_type": "MediaRenderer"},
+    }
+    NETBIOS = {"192.168.77.99": {"name": "ACCOUNTS-PC", "workgroup": "WORKGROUP", "mac": "", "services": [0, 32]}}
+    TTL = {
+        GATEWAY.ip: 64, "192.168.77.20": 64, "192.168.77.21": 64, "192.168.77.22": 64, "192.168.77.23": 64, "192.168.77.24": 64,
+        "192.168.77.25": 64, "192.168.77.99": 128,
+    }
+    BANNERS = {
+        "192.168.77.20": {"22": {"proto": "ssh", "banner": "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3"}, "80": {"proto": "http", "status": "HTTP/1.1 200 OK", "server": "lighttpd", "title": "Pi-hole admin"}},
+        "192.168.77.24": {"80": {"proto": "http", "status": "HTTP/1.1 200 OK", "title": "ESP32 sensor"}},
+    }
+
+    def mdns(self, ips, local_ip="", timeout=2.5, cancel=None):
+        return {ip: v for ip, v in self.MDNS.items() if ip in ips}
+
+    def ssdp(self, ips, local_ip="", timeout=3.0, cancel=None):
+        return {ip: v for ip, v in self.SSDP.items() if ip in ips}
+
+    def netbios(self, ips, timeout=1.0, cancel=None):
+        return {ip: v for ip, v in self.NETBIOS.items() if ip in ips}
+
+    def ttl(self, ips, timeout=1.0, cancel=None):
+        return {ip: {"ttl": self.TTL[ip], "initial": self.TTL[ip]} for ip in ips if ip in self.TTL}
+
+    def banners(self, targets, timeout=2.0, cancel=None):
+        return {ip: {p: v for p, v in pages.items() if int(p) in targets.get(ip, [])} for ip, pages in self.BANNERS.items() if ip in targets and any(int(p) in targets[ip] for p in pages)}
+
+
+def seed_identity(store: Store) -> None:
+    """A phone that announced itself over DHCP before the first sweep, as it would on a real network."""
+    store.set_info(DEVICES[3].mac, "dhcp", {"hostname": "Janes-iPhone", "vendor_class": "", "params": "1,121,3,6,15,119,252", "os": "iOS / iPadOS / macOS"})
+
+
 NAMES = {
     GATEWAY.ip: "router.lan", HOST.ip: "netscan-pi.lan", "192.168.77.20": "pihole.lan", "192.168.77.21": "nest-mini.lan",
     "192.168.77.22": "echo-dot.lan", "192.168.77.23": "janes-iphone.lan", "192.168.77.24": "esp32-sensor.lan",
@@ -125,5 +168,6 @@ def demo_setup() -> tuple[Config, DemoTransport, Callable[[str], str]]:
     cfg = load_config(None, home)
     store = Store(cfg.db_path)
     seed_traffic(store)
+    seed_identity(store)
     store.close()
     return cfg, DemoTransport(), demo_resolver

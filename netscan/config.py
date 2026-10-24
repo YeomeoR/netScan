@@ -55,6 +55,7 @@ class Config:
     interface: str = ""
     gateway: str = ""
     gateway_mac: str = ""  # optional: pin your router's MAC so the same CIDR on another network is refused
+    follow_network: bool = False  # also allow whatever private network this machine is connected to right now
     extra_protected: list[str] = field(default_factory=list)  # ips or macs never blocked
     block_method: str = "arp"  # arp | iptables | nftables
     home: Path = field(default_factory=default_home)
@@ -125,6 +126,7 @@ def load_config(path: Path | None = None, home: Path | None = None) -> Config:
         interface=net.get("interface", ""),
         gateway=net.get("gateway", ""),
         gateway_mac=net.get("gateway_mac", ""),
+        follow_network=bool(net.get("follow_network", False)),
         extra_protected=[str(x) for x in safety.get("extra_protected", [])],
         block_method=method,
         home=home,
@@ -160,7 +162,7 @@ CONFIG_TEMPLATE = """\
 [network]
 # allow-list: netScan refuses to scan or block anything outside these subnets
 allowed_subnets = [{subnets}]
-# interface = "en0"      # auto-detected when empty
+{follow_line}# interface = "en0"      # auto-detected when empty
 # gateway = "192.168.1.1" # auto-detected when empty
 {gateway_mac_line}
 [safety]
@@ -189,10 +191,15 @@ silent_baseline = true # first sweep seeds the inventory without alerting per de
 """
 
 
-def render_config(subnets: list[str], gateway_mac: str = "") -> str:
+def render_config(subnets: list[str], gateway_mac: str = "", follow: bool = False) -> str:
+    follow_line = (
+        "follow_network = true  # scan whichever private network this machine is on (laptop use); the same size and privacy limits apply\n"
+        if follow
+        else "# follow_network = true # laptop use: also allow whichever private network you are connected to\n"
+    )
     line = (
         f'gateway_mac = "{gateway_mac}"  # refuse to run on any other router with the same subnet\n'
         if gateway_mac
         else '# gateway_mac = "aa:bb:cc:dd:ee:ff" # pin your router\'s MAC: refuse a different network with the same subnet\n'
     )
-    return CONFIG_TEMPLATE.format(subnets=", ".join(f'"{s}"' for s in subnets), gateway_mac_line=line)
+    return CONFIG_TEMPLATE.format(subnets=", ".join(f'"{s}"' for s in subnets), gateway_mac_line=line, follow_line=follow_line)

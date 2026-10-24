@@ -55,8 +55,18 @@ def describe_device(ev: Event, store, now: float | None = None) -> dict:
     vendor = (dev.vendor if dev else "") or ev.vendor
     private = bool(ev.mac) and is_locally_administered(ev.mac)
     tail = ev.mac[-5:] if ev.mac else ""
+    found = {"name": "", "category": "", "os": "", "model": ""}
+    if store is not None and ev.mac:
+        try:
+            from netscan.discover.guess import flat, identity
+
+            found = identity(flat(store.get_info(ev.mac)), vendor, private)
+        except Exception:  # noqa: BLE001
+            pass
     if meta and meta.label:
         name = meta.label
+    elif found["name"]:
+        name = found["name"]
     elif vendor and not private:
         name = f"{vendor} {tail}".strip()
     elif private:
@@ -65,7 +75,8 @@ def describe_device(ev: Event, store, now: float | None = None) -> dict:
         name = ev.ip or ev.mac or ""
     return {
         "name": name, "label": meta.label if meta else "", "owner": meta.owner if meta else "",
-        "category": meta.category if meta else "", "trust": meta.trust if meta else "",
+        "category": (meta.category if meta else "") or found["category"], "guessed": bool(found["category"]) and not (meta and meta.category),
+        "os": found["os"], "model": found["model"], "found_name": found["name"], "trust": meta.trust if meta else "",
         "vendor": vendor, "private_mac": private, "hostname": (dev.hostname if dev else "") or ev.hostname,
         "ip": (dev.ip if dev else "") or ev.ip, "first_seen": dev.first_seen if dev else None,
         "known_for": ago(now - dev.first_seen) if dev else "",
@@ -105,7 +116,7 @@ def effective_alert_config(base: AlertConfig, store) -> AlertConfig:
 def ntfy_body(ev: Event, info: dict, why: str = "") -> str:
     lines = [ev.message]
     pairs = [
-        ("Name", info["label"]), ("Owner", info["owner"]), ("Type", info["category"]),
+        ("Name", info["label"]), ("Calls itself", info.get("found_name", "") if not info["label"] else ""), ("Owner", info["owner"]), ("Type", info["category"] + (" (guess)" if info.get("guessed") else "")), ("Model", info.get("model", "")), ("System", info.get("os", "")),
         ("IP", info["ip"]), ("MAC", ev.mac + (" (private/randomised)" if info["private_mac"] else "")),
         ("Vendor", info["vendor"] if not info["private_mac"] else ""), ("Hostname", info["hostname"]),
         ("Status", {"known": "known", "guest": "guest", "unknown": "not reviewed"}.get(info["trust"], "") if ev.mac else ""),

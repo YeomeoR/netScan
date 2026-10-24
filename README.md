@@ -51,6 +51,7 @@ source .venv/bin/activate
 pip install -e .
 
 netscan init            # detects your subnet, writes ~/.netscan/config.toml (the allow-list)
+# laptop that visits other networks (with permission): netscan init --follow
 netscan scan            # first run shows the own-network notice; unprivileged fallback sweep
 sudo .venv/bin/netscan scan              # full ARP sweep (root needed for raw sockets)
 ```

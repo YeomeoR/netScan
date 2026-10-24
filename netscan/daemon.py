@@ -60,6 +60,41 @@ class Daemon:
             return
         self.rt.alerter.dispatch(events)
 
+    def handle_packet(self, pkt) -> None:
+        """Watch callback: ARP frames check the inventory, DHCP requests teach us what the device calls itself."""
+        from scapy.layers.dhcp import BOOTP
+        from scapy.layers.l2 import ARP
+
+        if pkt.haslayer(ARP):
+            self.handle_arp(pkt)
+        elif pkt.haslayer(BOOTP):
+            self.handle_dhcp(pkt)
+
+    def handle_dhcp(self, pkt) -> None:
+        """A DHCP DISCOVER/REQUEST broadcast: keep the hostname, vendor class and option order the client announced."""
+        from scapy.layers.dhcp import BOOTP, DHCP
+
+        from netscan.discover.dhcpfp import parse_options
+        from netscan.macutil import normalise_mac
+
+        if not pkt.haslayer(DHCP) or pkt[BOOTP].op != 1:
+            return
+        mac = normalise_mac(":".join(f"{b:02x}" for b in bytes(pkt[BOOTP].chaddr)[:6]))
+        if not mac or mac == self.rt.local.mac:
+            return
+        info = parse_options(pkt[DHCP].options)
+        if not info:
+            return
+        try:
+            store = self.rt.store
+            if store.get_device(mac) is None and store.count_info("dhcp") >= store.MAX_DHCP_ROWS:
+                return
+            store.set_info(mac, "dhcp", info)
+        except Exception:  # noqa: BLE001
+            log.exception("DHCP watch failed to record a request")
+
+    WATCH_FILTER = "arp or (udp and (port 67 or port 68))"
+
     def _loop_sweeps(self) -> None:
         while not self.stop.wait(self.rt.cfg.daemon.sweep_interval):
             self.sweep_once()
@@ -78,7 +113,7 @@ class Daemon:
         if self.rt.cfg.daemon.arp_watch:
             threads.append(
                 threading.Thread(
-                    target=self.rt.transport.sniff, args=(self.rt.local.interface, "arp", self.handle_arp, self.stop), name="netscan-arpwatch", daemon=True
+                    target=self.rt.transport.sniff, args=(self.rt.local.interface, self.WATCH_FILTER, self.handle_packet, self.stop), name="netscan-arpwatch", daemon=True
                 )
             )
         if self.rt.cfg.daemon.capture_traffic:

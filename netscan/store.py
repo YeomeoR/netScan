@@ -115,6 +115,13 @@ CREATE TABLE IF NOT EXISTS port_scans (
     ts REAL NOT NULL,
     open TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS device_info (
+    mac TEXT NOT NULL,
+    source TEXT NOT NULL,
+    data TEXT NOT NULL DEFAULT '{}',
+    ts REAL NOT NULL,
+    PRIMARY KEY (mac, source)
+);
 """
 
 
@@ -528,3 +535,27 @@ class Store:
 
     def list_port_scans(self) -> list[dict]:
         return [{"mac": r["mac"], "ip": r["ip"], "ts": r["ts"], "open": json.loads(r["open"])} for r in self._all("SELECT * FROM port_scans")]
+
+    # what the device itself told us (mDNS, UPnP, NetBIOS, DHCP, TTL, banners); one JSON blob per source
+    INFO_SOURCES = ("mdns", "ssdp", "netbios", "dhcp", "ttl", "banners", "checked")
+    MAX_DHCP_ROWS = 2000
+
+    def set_info(self, mac: str, source: str, data: dict, now: float | None = None) -> None:
+        if source not in self.INFO_SOURCES:
+            raise ValueError(f"unknown info source {source!r}")
+        self._exec(
+            "INSERT INTO device_info(mac, source, data, ts) VALUES (?,?,?,?) ON CONFLICT(mac, source) DO UPDATE SET data=excluded.data, ts=excluded.ts",
+            (mac, source, json.dumps(data), now if now is not None else time.time()),
+        )
+
+    def get_info(self, mac: str) -> dict[str, dict]:
+        return {r["source"]: {"data": json.loads(r["data"]), "ts": r["ts"]} for r in self._all("SELECT * FROM device_info WHERE mac=?", (mac,))}
+
+    def all_info(self) -> dict[str, dict[str, dict]]:
+        out: dict[str, dict[str, dict]] = {}
+        for r in self._all("SELECT * FROM device_info"):
+            out.setdefault(r["mac"], {})[r["source"]] = {"data": json.loads(r["data"]), "ts": r["ts"]}
+        return out
+
+    def count_info(self, source: str) -> int:
+        return self._all("SELECT COUNT(*) AS n FROM device_info WHERE source=?", (source,))[0]["n"]

@@ -191,3 +191,10 @@ td.nowrap, .nowrap { white-space: nowrap; }
 .badge.ip_conflict, .badge.arp_spoof, .badge.rogue_dhcp, .badge.port_opened { background: var(--danger-bg); color: var(--danger); }
 textarea.input { resize: vertical; font: inherit; }
 @media (max-width: 640px) { .prow { grid-template-columns: 1fr; gap: 6px; } }
+.hours { display: flex; align-items: flex-end; gap: 2px; height: 48px; margin-top: 8px; }
+.hours > span { flex: 1; background: var(--ok); border-radius: 2px 2px 0 0; min-height: 3px; }
+.hours > span.none { background: var(--line); }
+details.src { margin: 4px 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+details.src summary { cursor: pointer; font-weight: 600; }
+details.src[open] summary { margin-bottom: 6px; }
+.reasons { margin: 6px 0; }

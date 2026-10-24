@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from netscan.alerts import Alerter
-from netscan.config import Config
+from netscan.config import Config, parse_subnets
 from netscan.net import GuardedTransport, LocalNet, ScapyTransport, Transport
 from netscan.monitor import DeviceTracker
 from netscan.oui import OuiDb
@@ -53,7 +53,9 @@ def build_runtime(cfg: Config, transport: Transport | None = None, resolve_hostn
     local = raw.local_net(cfg.interface)
     gateway = cfg.gateway or local.gateway_ip
     protected_macs = {local.mac} if local.mac else set()
-    scope = Scope(cfg.allowed_subnets, gateway_ip=gateway, host_ips=set(raw.local_ips()) | {local.ip}, protected_macs=protected_macs)
+    # follow_network: laptops move between networks, so the connected subnet is allowed too (still private and size-capped by parse_subnets)
+    allowed = cfg.allowed_subnets + parse_subnets([str(local.network)]) if cfg.follow_network else cfg.allowed_subnets
+    scope = Scope(allowed, gateway_ip=gateway, host_ips=set(raw.local_ips()) | {local.ip}, protected_macs=protected_macs)
     scope.check_network(local.network)
     for entry in cfg.extra_protected:
         scope.add_protected(entry)
@@ -86,7 +88,7 @@ def sweep(rt: Runtime, timeout: float = 3.0, now: float | None = None, resolve_n
     return hosts, events
 
 
-def write_initial_config(cfg: Config, transport: Transport, subnets: list[str] | None = None, force: bool = False) -> tuple[list[str], str, LocalNet]:
+def write_initial_config(cfg: Config, transport: Transport, subnets: list[str] | None = None, force: bool = False, follow: bool = False) -> tuple[list[str], str, LocalNet]:
     """Detect the local network, pin the gateway MAC when resolvable and write config.toml.
 
     Shared by `netscan init` and the dashboard. Returns (subnets, gateway_mac, local).
@@ -99,9 +101,9 @@ def write_initial_config(cfg: Config, transport: Transport, subnets: list[str] |
     chosen = list(subnets) if subnets else [str(local.network)]
     parse_subnets(chosen)
     try:
-        gw_mac = transport.resolve_mac(local.gateway_ip, local.interface) if local.gateway_ip else None
+        gw_mac = transport.resolve_mac(local.gateway_ip, local.interface) if local.gateway_ip and not follow else None
     except Exception:  # noqa: BLE001 pinning is optional
         gw_mac = None
     cfg.config_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg.config_path.write_text(render_config(chosen, gw_mac or ""), encoding="utf-8")
+    cfg.config_path.write_text(render_config(chosen, gw_mac or "", follow), encoding="utf-8")
     return chosen, gw_mac or "", local

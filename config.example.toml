@@ -3,6 +3,7 @@
 [network]
 # allow-list: netScan refuses to scan or block anything outside these subnets
 allowed_subnets = ["192.168.1.0/24"]
+# follow_network = true # laptop use: also allow whichever private network you are connected to
 # interface = "en0"      # auto-detected when empty
 # gateway = "192.168.1.1" # auto-detected when empty
 # gateway_mac = "aa:bb:cc:dd:ee:ff" # pin your router's MAC: refuse a different network with the same subnet

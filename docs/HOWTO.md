@@ -594,6 +594,7 @@ allowed_subnets = ["192.168.1.0/24"]   # netScan refuses to scan or block anythi
 # interface = "en0"
 # gateway = "192.168.1.1"
 # gateway_mac = "aa:bb:cc:dd:ee:ff"    # pins your router so the same subnet at a cafe is refused
+# follow_network = true                # laptop use: also allow whichever private network you are connected to
 
 [safety]
 extra_protected = []                   # more IPs or MACs that must never be blocked
@@ -612,6 +613,8 @@ silent_baseline = true                 # the first sweep seeds devices without a
 Rules enforced when the config loads: the allow-list must be private IPv4 and no larger than a /16, and the network the machine is on must sit inside it.
 
 If you replace your router or move house, run `netscan init --force` (stop the services first) so the router is pinned again.
+
+**Using the Mac on other networks (family and friends, with their say-so).** Run `netscan init --force --follow` (or tick "I move between networks" on the dashboard's first-run card). That writes `follow_network = true` and does not pin a router. From then on netScan allows whichever private network the Mac is connected to, as well as anything in `allowed_subnets`. The same limits apply: private IPv4 only, no larger than a /16, and a public network is refused. Press "Re-detect network" on the System tab after joining a new network (services stopped). Keep the Pi's config as it is; it stays on the home network. All networks share one database, so use a separate `NETSCAN_HOME` per place if you want the lists kept apart. Leave Block and MAC changing alone on other people's networks.
 
 Environment variables: `NETSCAN_HOME` (data folder), `NETSCAN_WEB_TOKEN` (token override), `NETSCAN_SOURCE` (path to the git clone used for updates), `NETSCAN_BRANCH` (branch the launcher and installer follow; default `main`).
 

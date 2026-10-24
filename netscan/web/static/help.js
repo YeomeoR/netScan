@@ -41,6 +41,22 @@ const SECTIONS = [
       h("p", { class: "muted" }, "If the previous run of a schedule is still going when the next one is due, the new run is skipped and flagged rather than piling up. Interrupted jobs (power cut, restart) are marked \"interrupted\" in Activity.")],
   },
   {
+    id: "identify",
+    title: "Who is this device? (identification and habits)",
+    body: (h) => [
+      h("p", {}, "Open a device and look at ", h("strong", {}, "What it says about itself"), ". netScan asks each device politely what it is, and keeps the answers so you can see where a name came from."),
+      h("dl", { class: "kv" },
+        h("dt", {}, "Bonjour (mDNS)"), h("dd", {}, "Apple, Chromecast, printers and many smart devices announce a friendly name and the services they offer."),
+        h("dt", {}, "UPnP"), h("dd", {}, "TVs, speakers and routers describe their maker and model."),
+        h("dt", {}, "NetBIOS"), h("dd", {}, "Windows PCs and many NAS boxes give their computer name."),
+        h("dt", {}, "DHCP request"), h("dd", {}, "The name a device asks for when it joins. Heard only while the Watch service is running, and only when a device (re)joins."),
+        h("dt", {}, "Ping reply"), h("dd", {}, "The time-to-live in the reply hints at the operating system family."),
+        h("dt", {}, "Banners"), h("dd", {}, "Web page titles and SSH greetings, read only from ports a Port check found open.")),
+      h("p", {}, "Press ", h("strong", {}, "Identify"), " in the device window, or ", h("strong", {}, "Identify all online devices"), " on the System tab. Automatic identification (System tab) quietly checks new devices after each scan, at most every 6 hours per device."),
+      h("p", {}, h("strong", {}, "Habits"), " shows how long a device has been offline, how often it drops off, the hours it is usually online, whether its address is randomised, and where its traffic goes (this needs Traffic capture)."),
+      h("p", { class: "muted" }, "Names found this way are shown only when you have not named the device yourself. A suggested type is only a guess: nothing is saved until you press the button. Only addresses in your allow-list are contacted.")],
+  },
+  {
     id: "block",
     title: "Blocking and unblocking a device",
     body: (h) => [

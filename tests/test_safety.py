@@ -193,3 +193,34 @@ def test_config_rejects_flappy_intervals_and_bad_gateway_mac(tmp_path):
     (tmp_path / "config.toml").write_text('[network]\ngateway_mac="nope"\n')
     with pytest.raises(ConfigError):
         load_config(home=tmp_path)
+
+
+# follow_network (laptop use)
+
+def test_follow_network_allows_the_connected_private_network_that_the_list_does_not_cover(cfg):
+    other = FakeTransport(network="192.168.50.0/24", local_ip="192.168.50.7", gateway="192.168.50.1")
+    with pytest.raises(OutOfScopeError):
+        build_runtime(cfg, other)
+    cfg.follow_network = True
+    rt = build_runtime(cfg, other)
+    assert rt.scope.contains("192.168.50.20") and rt.scope.contains("192.168.1.20"), "connected network and the listed one are both allowed"
+    assert not rt.scope.contains("192.168.60.20"), "networks that are neither listed nor connected stay refused"
+    assert cfg.allowed_subnets == [NET], "following must not rewrite the saved allow-list"
+    rt.store.close()
+
+
+def test_follow_network_still_refuses_a_public_or_huge_connected_network(cfg):
+    for network, ip, gw in (("8.8.8.0/24", "8.8.8.7", "8.8.8.1"), ("10.0.0.0/8", "10.1.2.3", "10.0.0.1")):
+        cfg.follow_network = True
+        with pytest.raises(ConfigError):
+            build_runtime(cfg, FakeTransport(network=network, local_ip=ip, gateway=gw))
+
+
+def test_init_follow_writes_flag_without_pinning_and_default_init_is_unchanged(tmp_path):
+    assert cli.main(["--home", str(tmp_path), "--accept-terms", "init", "--follow"], transport=FakeTransport()) == 0
+    cfg = load_config(home=tmp_path)
+    assert cfg.follow_network and cfg.gateway_mac == "", "a roaming config must not pin the router"
+    other = tmp_path / "plain"
+    assert cli.main(["--home", str(other), "--accept-terms", "init"], transport=FakeTransport()) == 0
+    plain = load_config(home=other)
+    assert not plain.follow_network and plain.gateway_mac == GW_MAC, "plain init keeps the home-network pin"

@@ -32,7 +32,7 @@ from netscan.web.errors import ApiError
 log = logging.getLogger("netscan.web.http")
 
 MAX_BODY = 64 * 1024
-STATIC_FILES = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/help.js": "help.js", "/extra.js": "extra.js", "/updates.js": "updates.js", "/spoof.js": "spoof.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
+STATIC_FILES = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/help.js": "help.js", "/extra.js": "extra.js", "/updates.js": "updates.js", "/spoof.js": "spoof.js", "/identify.js": "identify.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 
 
@@ -94,6 +94,9 @@ def build_routes(c: Controller) -> list[Route]:
         r("GET", "/api/security", lambda m, q, b: c.security()),
         r("POST", "/api/security/dhcp-probe", lambda m, q, b: c.submit_dhcp_probe()),
         r("POST", "/api/security/ports", lambda m, q, b: c.submit_ports(b)),
+        r("POST", "/api/identify", lambda m, q, b: c.submit_identify(b)),
+        r("GET", "/api/identify/settings", lambda m, q, b: c.identify_settings()),
+        r("PUT", "/api/identify/settings", lambda m, q, b: c.set_identify_settings(b)),
         r("POST", "/api/scan", lambda m, q, b: c.submit_scan(b)),
         r("POST", "/api/traffic", lambda m, q, b: c.submit_traffic(b)),
         r("POST", "/api/update-oui", lambda m, q, b: c.submit_update_oui()),

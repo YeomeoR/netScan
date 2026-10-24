@@ -19,7 +19,10 @@ from netscan import __version__
 from netscan.blocker import ArpEnforcer, BlockError, BlockManager, make_firewall
 from netscan.config import Config, ConfigError, load_config, parse_subnets
 from netscan.daemon import Daemon
-from netscan.macutil import normalise_mac
+from netscan.behaviour import summarise
+from netscan.discover import guess as dguess
+from netscan.discover.engine import identify, stale_devices
+from netscan.macutil import is_locally_administered, normalise_mac
 from netscan.monitor import BASELINE, DEVICE_OFFLINE, DEVICE_ONLINE, IP_CHANGED, NEW_DEVICE
 from netscan.net import ScapyTransport, Transport
 from netscan.oui import OuiDb, update_oui
@@ -28,7 +31,7 @@ from netscan.safety import NOTICE, SafetyError
 from netscan.store import Block, Device, DeviceMeta, JobRow, Schedule, Store
 from netscan.traffic import TrafficCollector, run_capture, service_name
 from netscan.web.errors import ApiError
-from netscan.portscan import port_info
+from netscan.portscan import port_info, tcp_connect
 from netscan.web.features import FeatureMixin, display_name, meta_dict, presence_segments
 from netscan.spoof import Spoofer
 from netscan.update import Updater
@@ -68,16 +71,25 @@ class _Service:
         return bool(self.thread and self.thread.is_alive())
 
 
-def device_dict(d: Device, blocked: dict[str, Block], totals: dict[str, tuple[int, int]], metas: dict[str, DeviceMeta] | None = None) -> dict:
+def device_dict(
+    d: Device, blocked: dict[str, Block], totals: dict[str, tuple[int, int]], metas: dict[str, DeviceMeta] | None = None,
+    infos: dict[str, dict[str, dict]] | None = None,
+) -> dict:
     b, p = totals.get(d.mac, (0, 0))
     blk = blocked.get(d.mac)
     meta = (metas or {}).get(d.mac)
+    rows = (infos or {}).get(d.mac, {})
+    private = is_locally_administered(d.mac)
+    ident = dguess.identity(dguess.flat(rows), d.vendor, private) if rows else {"name": "", "name_source": "", "category": "", "os": "", "model": ""}
     return {
         "mac": d.mac, "ip": d.ip, "vendor": d.vendor, "hostname": d.hostname,
         "first_seen": d.first_seen, "last_seen": d.last_seen, "online": d.online,
         "blocked": blk is not None, "block": block_dict(blk) if blk else None,
         "bytes": b, "packets": p,
-        **meta_dict(meta), "name": display_name(d, meta),
+        **meta_dict(meta), "name": display_name(d, meta, found=ident["name"]),
+        "found_name": ident["name"], "found_source": ident["name_source"], "guess_category": ident["category"],
+        "guess_os": ident["os"], "guess_model": ident["model"], "private_mac": private,
+        "identified": (rows.get("checked") or {}).get("ts"),
     }
 
 
@@ -124,6 +136,8 @@ def describe_summary(kind: str, summary: dict) -> str:
     if kind == "dhcp":
         n, bad = summary.get("offers", 0), summary.get("problems", 0)
         return f"{n} DHCP server{'s' if n != 1 else ''} answered" + (f", {bad} problem{'s' if bad != 1 else ''} found" if bad else ", looks normal")
+    if kind == "identify":
+        return f"{summary.get('devices', 0)} devices asked, {summary.get('named', 0)} with a name"
     if kind == "ports":
         text = f"{summary.get('devices', 0)} devices checked, {summary.get('open', 0)} open ports"
         return text + (f", {summary['findings']} new finding(s)" if summary.get("findings") else "")
@@ -146,7 +160,9 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
         updater: Updater | None = None,
         spoofer: Spoofer | None = None,
         update_tick: float = 300.0,
+        prober=None,
     ):
+        self.prober = prober
         self.cfg = cfg
         self.raw = transport or ScapyTransport()
         self.daemon_mode = daemon
@@ -330,6 +346,7 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
             "network": network,
             "allowed_subnets": [str(n) for n in self.cfg.allowed_subnets],
             "gateway_pinned": bool(self.cfg.gateway_mac),
+            "follow_network": self.cfg.follow_network,
             "privileged": can_raw,
             "block_method": self.cfg.block_method,
             "counts": {
@@ -348,7 +365,8 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
         blocked = {b.mac: b for b in self.store.list_blocks()}
         totals = self.store.traffic_totals()
         metas = self.store.list_meta()
-        return [device_dict(d, blocked, totals, metas) for d in self.store.list_devices()]
+        infos = self.store.all_info()
+        return [device_dict(d, blocked, totals, metas, infos) for d in self.store.list_devices()]
 
     def device_detail(self, ident: str) -> dict:
         dev = self.store.find_device(normalise_mac(ident) or ident)
@@ -373,10 +391,78 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
         )
         rule = self.rule_holding(dev.mac)
         return {
-            "device": device_dict(dev, blocked, totals, self.store.list_meta()), "traffic": traffic, "events": events,
+            "device": device_dict(dev, blocked, totals, self.store.list_meta(), self.store.all_info()), "traffic": traffic, "events": events,
             "ports": ports, "presence": {"since": now - 7 * 86400, "until": now, "segments": segs},
             "held_by_rule": {"id": rule.id, "name": rule.name} if rule else None,
+            "identity": self._identity(dev), "behaviour": self._behaviour(dev, now),
         }
+
+    def _identity(self, dev: Device) -> dict:
+        rows = self.store.get_info(dev.mac)
+        found = dguess.identity(dguess.flat(rows), dev.vendor, is_locally_administered(dev.mac))
+        sources = {k: v for k, v in rows.items() if k != "checked"}
+        return {**found, "sources": sources, "checked": (rows.get("checked") or {}).get("ts"), "can_identify": self.prober is not None}
+
+    def _behaviour(self, dev: Device, now: float) -> dict:
+        since = now - 14 * 86400
+        segs = presence_segments(
+            [(r["ts"], r["kind"]) for r in self.store.events_for_mac(dev.mac)], dev.first_seen, since, now, self.cfg.daemon.offline_after,
+        )
+        return summarise(
+            online=dev.online, last_seen=dev.last_seen, first_seen=dev.first_seen, segments=segs, since=since, now=now,
+            private_mac=is_locally_administered(dev.mac), traffic_rows=self.store.traffic_for(dev.mac),
+        )
+
+    # device identification
+    def identify_settings(self) -> dict:
+        saved = self.store.get_setting("identify", {}) or {}
+        return {"auto": bool(saved.get("auto", True)), "available": self.prober is not None}
+
+    def set_identify_settings(self, body: dict) -> dict:
+        if not isinstance(body, dict) or not isinstance(body.get("auto"), bool):
+            raise ApiError(400, "auto must be true or false")
+        self.store.set_setting("identify", {"auto": body["auto"]})
+        return self.identify_settings()
+
+    def submit_identify(self, body: dict) -> dict:
+        if self.prober is None:
+            raise ApiError(409, "device identification is not available in this session")
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be an object")
+        raw = body.get("macs")
+        if raw is None:
+            macs = [d.mac for d in self.store.list_devices() if d.online]
+        elif isinstance(raw, list) and raw and all(isinstance(m, str) for m in raw) and len(raw) <= 256:
+            macs = [self._require_device(m).mac for m in raw]
+        else:
+            raise ApiError(400, "macs must be a list of device MAC addresses")
+        if not macs:
+            raise ApiError(400, "no online devices to identify; run a scan first or pick devices")
+        deep = body.get("deep", True)
+        if not isinstance(deep, bool):
+            raise ApiError(400, "deep must be true or false")
+        return self._submit("identify", {"macs": list(dict.fromkeys(macs)), "deep": deep})
+
+    def _auto_identify(self) -> None:
+        """After a sweep, quietly ask devices nobody has asked in the last few hours what they are."""
+        if self.prober is None or not self.identify_settings()["auto"] or self._closed.is_set():
+            return
+        if any(j.kind == "identify" for j in self.store.active_jobs()):
+            return
+        due = stale_devices(self.store, self.store.list_devices(), self.clock())
+        if due:
+            self._submit("identify", {"macs": [d.mac for d in due], "deep": False}, "auto")
+
+    def _do_identify(self, params: dict, cancel: threading.Event) -> dict:
+        if self.prober is None:
+            raise ApiError(409, "device identification is not available in this session")
+        rt = self._runtime()
+        devices = [d for d in (self.store.get_device(m) for m in params.get("macs", [])) if d]
+        deep = bool(params.get("deep"))
+        return identify(
+            self.prober, self.store, rt.scope, devices, local_ip=rt.local.ip, now=self.clock(), deep=deep,
+            connect=getattr(self.raw, "port_connect", tcp_connect) if deep else None, cancel=cancel,
+        )
 
     def blocks(self) -> list[dict]:
         return [block_dict(b) for b in self.store.list_blocks()]
@@ -393,7 +479,7 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
 
         return {
             "path": str(cfg.config_path), "home": str(cfg.home), "db_path": str(cfg.db_path),
-            "allowed_subnets": [str(n) for n in cfg.allowed_subnets], "interface": cfg.interface or "auto",
+            "allowed_subnets": [str(n) for n in cfg.allowed_subnets], "follow_network": cfg.follow_network, "interface": cfg.interface or "auto",
             "gateway": cfg.gateway or "auto", "gateway_mac": cfg.gateway_mac, "extra_protected": cfg.extra_protected,
             "block_method": cfg.block_method,
             "alerts": {
@@ -414,12 +500,15 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
         force = body.get("force", False)
         if not isinstance(force, bool):
             raise ApiError(400, "force must be true or false")
+        follow = body.get("follow_network", False)
+        if not isinstance(follow, bool):
+            raise ApiError(400, "follow_network must be true or false")
         if any(s.running for s in self._services.values()):
             raise ApiError(409, "stop the running services before changing the config")
         try:
             if subnets:
                 parse_subnets(subnets)
-            chosen, gw_mac, local = write_initial_config(self.cfg, self.raw, subnets, force)
+            chosen, gw_mac, local = write_initial_config(self.cfg, self.raw, subnets, force, follow)
         except ConfigError as exc:
             raise ApiError(409 if "already exists" in str(exc) else 400, str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
@@ -514,6 +603,8 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
                 summary = self._do_dhcp()
             elif job.kind == "ports":
                 summary = self._do_ports(job.params, cancel)
+            elif job.kind == "identify":
+                summary = self._do_identify(job.params, cancel)
             else:
                 raise ApiError(400, f"unknown job kind {job.kind!r}")
             state = "cancelled" if cancel.is_set() else "done"
@@ -555,6 +646,8 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
         }
         if params.get("capture_seconds") and not cancel.is_set():
             summary["capture"] = self._capture(rt, params["capture_seconds"], params.get("flush", 5.0), cancel)
+        if not cancel.is_set():
+            self._auto_identify()
         return summary
 
     def _do_traffic(self, params: dict, cancel: threading.Event) -> dict:
@@ -706,7 +799,7 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
     @staticmethod
     def _run_watch(svc: _Service, rt: Runtime) -> None:
         daemon = Daemon(rt, svc.stop)
-        rt.transport.sniff(rt.local.interface, "arp", daemon.handle_arp, svc.stop)
+        rt.transport.sniff(rt.local.interface, Daemon.WATCH_FILTER, daemon.handle_packet, svc.stop)
 
     def _run_capture(self, svc: _Service, rt: Runtime) -> None:
         collector = TrafficCollector(rt.store, resolver=self.resolver)

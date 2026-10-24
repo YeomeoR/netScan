@@ -3,6 +3,7 @@ import { buildHelp } from "/help.js";
 import { createExtra } from "/extra.js";
 import { createUpdates } from "/updates.js";
 import { createSpoof } from "/spoof.js";
+import { createIdentify } from "/identify.js";
 // Every piece of data from the network (hostnames, vendors) is inserted with textContent via h(),
 // never innerHTML, so a device cannot inject markup into this page.
 
@@ -206,8 +207,10 @@ function setupCard() {
   if (!s || s.ready) return null;
   const body = [h("h3", {}, s.configured ? "netScan cannot start scanning" : "Set up netScan for this network"), h("p", {}, s.error || "No configuration found.")];
   if (!s.configured) {
+    const follow = h("input", { type: "checkbox", id: "f-follow" });
     body.push(h("p", { class: "muted" }, "This detects your subnet, pins your router's MAC (so the config refuses to run on any other network) and writes the allow-list. netScan will only scan or block inside it."));
-    body.push(h("button", { class: "btn primary", onclick: () => act(() => api("POST", "/api/init", {}), "Config written") }, "Detect my network and create config"));
+    body.push(h("div", { class: "field inline" }, follow, h("label", { for: "f-follow" }, "I move between networks (laptop): work on whichever private network I am connected to, and do not pin the router")));
+    body.push(h("button", { class: "btn primary", onclick: () => act(() => api("POST", "/api/init", { follow_network: follow.checked }), "Config written") }, "Detect my network and create config"));
   } else {
     body.push(h("button", { class: "btn", onclick: () => act(() => api("POST", "/api/refresh"), "Network re-detected") }, "Try again"));
   }
@@ -291,6 +294,8 @@ async function openDevice(mac) {
         h("dt", {}, "First seen"), h("dd", {}, fmtTime(d.first_seen)),
         h("dt", {}, "Last seen"), h("dd", {}, `${fmtTime(d.last_seen)} (${ago(d.last_seen)})`),
         d.block ? [h("dt", {}, "Blocked"), h("dd", {}, `${fmtTime(d.block.blocked_at)} via ${d.block.method}${d.block.reason ? ` - ${d.block.reason}` : ""}`)] : null),
+      identify.identityBlock(data),
+      identify.behaviourBlock(data),
       h("h3", { class: "muted" }, "Traffic metadata (no payloads)"),
       data.traffic.length ? trafficTable(data.traffic) : h("p", { class: "muted" }, "No traffic recorded for this device. ", state.status.capture_limits),
       h("h3", { class: "muted" }, "Recent events"),
@@ -311,6 +316,7 @@ function trafficTable(rows) {
 
 const updates = createUpdates({ h, clear, api, act, toast, state, ago, fmtTime, rerender: () => { if (shell) { updateShell(); views[state.tab].update(); } } });
 const spoof = createSpoof({ h, clear, api, act, toast, state, fmtDur, fmtTime, label, rerender: () => { if (shell) views[state.tab].update(); } });
+const identify = createIdentify({ h, clear, api, act, toast, closeModal, state, ago, fmtTime, fmtDur, fmtBytes, refresh: () => refresh(), rerender: () => { if (shell) views[state.tab].update(); } });
 const extra = createExtra({ h, clear, api, act, toast, modal, closeModal, field, state, ago, fmtTime, fmtDur, until, refresh: () => refresh(), openDevice: (m) => openDevice(m), label, isProtected });
 
 // ---------- views ----------
@@ -370,7 +376,7 @@ views.devices = (() => {
         const pick = h("input", { type: "checkbox", checked: state.selected.has(d.mac), "aria-label": `Select ${label(d)}`, disabled: isProtected(d),
           onchange: (e) => { if (e.target.checked) state.selected.add(d.mac); else state.selected.delete(d.mac); view.update(); } });
         pick.addEventListener("click", (e) => e.stopPropagation());
-        const sub = [d.owner, d.name && d.hostname && d.name !== d.hostname ? d.hostname : (d.name ? null : d.vendor), d.category].filter(Boolean).join(" · ");
+        const sub = [d.owner, d.name && d.hostname && d.name !== d.hostname ? d.hostname : (d.name ? null : d.vendor), d.category || (d.guess_category ? `${d.guess_category}?` : "")].filter(Boolean).join(" · ");
         tbody.append(h("tr", { class: "clickable", onclick: () => openDevice(d.mac) },
           h("td", { class: "selcell", onclick: (e) => e.stopPropagation() }, pick),
           h("td", {}, statusCell(d)),
@@ -516,10 +522,11 @@ views.schedule = (() => {
 function describeSource(src) {
   if (src === "manual") return "manual";
   if (src === "startup") return "start-up";
+  if (src === "auto") return "automatic";
   if (src.startsWith("schedule:")) { const sc = state.schedules.find((x) => `schedule:${x.id}` === src); return sc ? sc.name : "schedule"; }
   return src;
 }
-const JOB_NAMES = { sweep: "Scan", traffic: "Capture", update_oui: "Vendor update", update: "Update", spoof: "MAC change", unspoof: "MAC restore", dhcp: "DHCP check", ports: "Port check" };
+const JOB_NAMES = { sweep: "Scan", traffic: "Capture", update_oui: "Vendor update", update: "Update", spoof: "MAC change", unspoof: "MAC restore", dhcp: "DHCP check", ports: "Port check", identify: "Identify" };
 function jobSummary(j) {
   const sm = j.summary || {};
   if (j.error) return j.error;
@@ -531,6 +538,7 @@ function jobSummary(j) {
   if (j.kind === "traffic" && sm.packets !== undefined) return `${sm.packets} packets, ${fmtBytes(sm.bytes)} across ${sm.devices} devices`;
   if (j.kind === "dhcp" && sm.offers !== undefined) return `${sm.offers} DHCP server${sm.offers === 1 ? "" : "s"} answered${sm.problems ? `, ${sm.problems} problem${sm.problems === 1 ? "" : "s"} found` : ", looks normal"}`;
   if (j.kind === "ports" && sm.devices !== undefined) return `${sm.devices} devices checked, ${sm.open} open ports${sm.findings ? `, ${sm.findings} new finding(s)` : ""}`;
+  if (j.kind === "identify" && sm.devices !== undefined) return `${sm.devices} device${sm.devices === 1 ? "" : "s"} asked, ${sm.named} with a name`;
   if (j.kind === "update" && sm.to) return `${sm.from} to ${sm.to}${sm.restarting ? ", restarting" : ", restart netScan to use it"}`;
   if (j.kind === "spoof" && sm.mac) return `${sm.interface} now uses ${sm.mac}`;
   if (j.kind === "unspoof" && sm.mac) return `${sm.interface} is back to ${sm.mac}`;
@@ -598,12 +606,13 @@ views.blocks = (() => {
 })();
 
 views.system = (() => {
-  let setup, services, tools, cfg, about, alertsBox, updatesBox, spoofBox;
+  let setup, services, tools, cfg, about, alertsBox, updatesBox, spoofBox, identBox;
   return {
     mount(root) {
-      setup = h("div"); services = h("div", { class: "card" }); tools = h("div", { class: "card" }); cfg = h("div", { class: "card" }); about = h("div", { class: "card" }); alertsBox = h("div"); updatesBox = h("div"); spoofBox = h("div");
-      root.append(setup, h("div", { class: "grid2" }, services, tools), h("div", { class: "grid2" }, alertsBox, cfg), h("div", { class: "grid2" }, updatesBox, about), h("div", { class: "grid2" }, spoofBox));
+      setup = h("div"); services = h("div", { class: "card" }); tools = h("div", { class: "card" }); cfg = h("div", { class: "card" }); about = h("div", { class: "card" }); alertsBox = h("div"); updatesBox = h("div"); spoofBox = h("div"); identBox = h("div");
+      root.append(setup, h("div", { class: "grid2" }, services, tools), h("div", { class: "grid2" }, alertsBox, cfg), h("div", { class: "grid2" }, updatesBox, about), h("div", { class: "grid2" }, spoofBox, identBox));
       extra.loadAlerts().then(() => this.update());
+      identify.loadSettings().then(() => { if (state.tab === "system") this.update(); });
       updates.load(true).then(() => { if (state.tab === "system") { updateShell(); this.update(); } });
       api("GET", "/api/config").then((c) => { state.config = c; this.update(); }).catch(() => {});
     },
@@ -628,11 +637,12 @@ views.system = (() => {
       clear(alertsBox).append(extra.alertsCard());
       clear(updatesBox).append(updates.card());
       if (!spoofBox.contains(document.activeElement)) clear(spoofBox).append(spoof.card());
+      if (!identBox.contains(document.activeElement)) clear(identBox).append(identify.card());
       const c = state.config;
       clear(cfg).append(h("h2", {}, "Configuration (edit in config.toml)"));
       if (c) cfg.append(h("dl", { class: "kv" },
         h("dt", {}, "Config file"), h("dd", { class: "mono" }, c.path),
-        h("dt", {}, "Allow-list"), h("dd", {}, c.allowed_subnets.join(", ") || "none"),
+        h("dt", {}, "Allow-list"), h("dd", {}, [...c.allowed_subnets, ...(c.follow_network ? ["whichever private network you are connected to"] : [])].join(", ") || "none"),
         h("dt", {}, "Gateway pin"), h("dd", { class: "mono" }, c.gateway_mac || "not pinned"),
         h("dt", {}, "Block method"), h("dd", {}, c.block_method),
         h("dt", {}, "Also protected"), h("dd", {}, c.extra_protected.join(", ") || "gateway and this machine only"),

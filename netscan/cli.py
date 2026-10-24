@@ -91,6 +91,86 @@ def traffic_table(store: Store, mac: str, limit: int = 25) -> Table:
     return table
 
 
+def identity_table(store: Store, dev: Device) -> Table:
+    from netscan.discover.guess import flat, identity
+    from netscan.macutil import is_locally_administered
+
+    rows = store.get_info(dev.mac)
+    found = identity(flat(rows), dev.vendor, is_locally_administered(dev.mac))
+    table = Table(title="What it says about itself", header_style="bold", show_header=False)
+    table.add_column(style="bold")
+    table.add_column()
+    if not rows:
+        table.add_row("Nothing yet", "run `netscan identify` (or open the dashboard's Identify button)")
+        return table
+    table.add_row("Name", f"{found['name']} [dim]({found['name_source']})[/]" if found["name"] else "-")
+    table.add_row("Looks like", " / ".join(x for x in (found["category"], found["os"], found["model"]) if x) or "-")
+    for reason in found["reasons"]:
+        table.add_row("", f"[dim]{reason}[/]")
+    labels = {"mdns": "Bonjour", "ssdp": "UPnP", "netbios": "NetBIOS", "dhcp": "DHCP", "ttl": "Ping TTL", "banners": "Banners"}
+    for src, label in labels.items():
+        if src in rows:
+            table.add_row(label, _info_line(src, rows[src]["data"]) + f" [dim]{fmt_ts(rows[src]['ts'])}[/]")
+    return table
+
+
+def _info_line(source: str, data: dict) -> str:
+    if source == "mdns":
+        bits = [data.get("friendly"), data.get("hostname") and f"host {data['hostname']}", data.get("services") and "services " + ", ".join(data["services"][:6])]
+    elif source == "ssdp":
+        bits = [data.get("friendly"), data.get("manufacturer"), data.get("model"), data.get("device_type")]
+    elif source == "netbios":
+        bits = [data.get("name"), data.get("workgroup") and f"workgroup {data['workgroup']}"]
+    elif source == "dhcp":
+        bits = [data.get("hostname"), data.get("vendor_class"), data.get("os")]
+    elif source == "ttl":
+        bits = [f"{data.get('ttl')} (started at {data.get('initial')})"]
+    else:
+        bits = [f"{port}: " + " ".join(str(v) for k, v in page.items() if k != "proto") for port, page in data.items()]
+    return "; ".join(str(b) for b in bits if b) or "-"
+
+
+def make_demo_prober():
+    from netscan.web.demo import DemoProber
+
+    return DemoProber()
+
+
+def make_prober():
+    from netscan.discover.probes import NetworkProber
+
+    return NetworkProber()
+
+
+def cmd_identify(args, cfg, transport) -> int:
+    from netscan.discover.engine import identify
+    from netscan.portscan import tcp_connect
+
+    rt = build_runtime(cfg, transport, None)
+    if args.targets:
+        devices = []
+        for t in args.targets:
+            dev = rt.store.find_device(normalise_mac(t) or t)
+            if dev is None:
+                err.print(f"unknown device {t!r}; run `netscan scan` first")
+                return 1
+            devices.append(dev)
+    else:
+        devices = [d for d in rt.store.list_devices() if d.online]
+    if not devices:
+        console.print("No online devices recorded. Run `netscan scan` first.")
+        return 0
+    with console.status(f"Asking {len(devices)} device(s) what they are (about 10 seconds)..."):
+        summary = identify(
+            make_prober(), rt.store, rt.scope, devices, local_ip=rt.local.ip, now=time.time(), deep=not args.no_ports,
+            connect=None if args.no_ports else getattr(transport, "port_connect", tcp_connect),
+        )
+    console.print(f"{summary['named']} of {summary['devices']} devices gave a name.")
+    for dev in devices:
+        console.print(identity_table(rt.store, dev))
+    return 0
+
+
 def setup_logging(verbose: bool, plain: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     if plain:
@@ -117,6 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("init", help="write a config with the detected local subnet as the allow-list")
     s.add_argument("--subnet", action="append", help="allowed subnet (repeatable); default: detected local subnet")
+    s.add_argument("--follow", action="store_true", help="laptop use: also allow whichever private network you are connected to, and do not pin the router")
     s.add_argument("--force", action="store_true")
     sub.add_parser("notice", help="show and acknowledge the own-network-only notice")
     s = sub.add_parser("scan", help="ARP sweep the local subnet and show devices")
@@ -125,6 +206,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="show known devices from the database")
     s = sub.add_parser("show", help="device detail plus traffic metadata")
     s.add_argument("target", help="ip or mac")
+    s = sub.add_parser("identify", help="ask devices what they are (Bonjour, UPnP, NetBIOS, TTL, banners) and show what they said")
+    s.add_argument("targets", nargs="*", help="ips or MACs (default: every device seen online)")
+    s.add_argument("--no-ports", action="store_true", help="skip the web/SSH port check and banner reading")
     s = sub.add_parser("traffic", help="capture traffic metadata for a while, then summarise")
     s.add_argument("--duration", type=int, default=30, help="seconds to capture")
     s.add_argument("--flush", type=float, default=5.0)
@@ -162,7 +246,7 @@ def cmd_init(args, cfg, transport) -> int:
     if cfg.config_path.exists() and not args.force:
         err.print(f"{cfg.config_path} already exists (use --force to overwrite)")
         return 1
-    subnets, gw_mac, local = write_initial_config(cfg, transport, args.subnet, args.force)
+    subnets, gw_mac, local = write_initial_config(cfg, transport, args.subnet, args.force, args.follow)
     if not args.subnet:
         console.print(f"Detected local network [bold]{local.network}[/] on {local.interface}")
     if gw_mac:
@@ -202,6 +286,7 @@ def cmd_show(args, cfg, transport) -> int:
         err.print(f"unknown device {args.target!r}; run `netscan scan` first")
         return 1
     console.print(devices_table([dev], store.list_blocks(), title=f"Device {dev.mac}"))
+    console.print(identity_table(store, dev))
     if store.traffic_for(dev.mac):
         console.print(traffic_table(store, dev.mac))
     else:
@@ -344,7 +429,8 @@ def cmd_web(args, cfg, transport) -> int:
         from netscan.update import Updater
 
         updater = Updater(disabled_reason="Updates are switched off in demo mode.") if args.demo else None
-        controller = Controller(cfg, transport, daemon=args.daemon, resolver=resolver, updater=updater)
+        prober = make_demo_prober() if args.demo else make_prober()
+        controller = Controller(cfg, transport, daemon=args.daemon, resolver=resolver, updater=updater, prober=prober)
         if args.demo:
             controller.spoofer.disabled_reason = "Changing the MAC address is switched off in demo mode."
         server = make_server(controller, args.host, args.port, token)
@@ -465,7 +551,7 @@ def cmd_spoof(args, cfg, transport) -> int:
 
 COMMANDS = {
     "init": cmd_init, "scan": cmd_scan, "list": cmd_list, "show": cmd_show, "traffic": cmd_traffic,
-    "block": cmd_block, "unblock": cmd_unblock, "blocks": cmd_blocks, "enforce": cmd_enforce,
+    "identify": cmd_identify, "block": cmd_block, "unblock": cmd_unblock, "blocks": cmd_blocks, "enforce": cmd_enforce,
     "watch": cmd_watch, "daemon": cmd_daemon, "events": cmd_events, "update-oui": cmd_update_oui, "web": cmd_web, "update": cmd_update, "spoof": cmd_spoof,
 }
 

@@ -45,7 +45,9 @@ export function createSpoof(ctx) {
     const pick = h("select", { class: "input", "aria-label": "Pick another device on the network" },
       h("option", { value: "" }, "Pick a device on the network..."),
       devices.map((d) => h("option", { value: d.mac }, `${label(d)} (${d.mac})${d.online ? " - online" : ""}`)));
-    const mac = h("input", { class: "input mono", placeholder: "or type aa:bb:cc:dd:ee:ff", value: draft.mac, "aria-label": "MAC address to use", autocomplete: "off", spellcheck: "false" });
+    const choices = h("datalist", { id: "sp-macs" },
+      devices.map((d) => h("option", { value: d.mac, label: `${label(d)}${d.online ? " (online)" : ""}` })));
+    const mac = h("input", { class: "input mono", list: "sp-macs", placeholder: "pick or type aa:bb:cc:dd:ee:ff", value: draft.mac, "aria-label": "MAC address to use", autocomplete: "off", spellcheck: "false" });
     function sync() {
       const d = find(draft.mac);
       pick.value = d ? d.mac : "";
@@ -64,9 +66,10 @@ export function createSpoof(ctx) {
     el.append(
       h("p", { class: "muted" }, "Make this machine's own network card use another device's address for a while, to see how your network treats that device. The real address is saved first and comes back automatically."),
       h("div", { class: "formgrid" }, pick, mac, mins),
+      choices,
       warn,
       h("div", { class: "row" }, h("button", { class: "btn primary", disabled: s.busy, onclick: start }, s.busy ? "Working..." : "Use this address")),
-      h("p", { class: "muted small" }, "Pick a device from the list to fill the address in, or type any address yourself. Only this machine's own interface is changed, never another device. The router's address is refused. Expect a short network drop and a possible new IP address."));
+      h("p", { class: "muted small" }, "Pick a device, or click the address box to choose from the addresses on your network, or type any address yourself. Only this machine's own interface is changed, never another device. The router's address is refused. Expect a short network drop and a possible new IP address."));
     return el;
   }
 

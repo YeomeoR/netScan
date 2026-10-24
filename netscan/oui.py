@@ -10,6 +10,12 @@ from pathlib import Path
 from netscan.macutil import is_locally_administered, normalise_mac
 
 IEEE_CSV_URL = "https://standards-oui.ieee.org/oui/oui.csv"
+# IEEE rejects urllib's default User-Agent (HTTP 418), so identify as a normal client.
+FETCH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; netScan OUI updater; +https://github.com/YeomeoR/netScan)",
+    "Accept": "text/csv,text/plain,*/*",
+}
+FALLBACK_URLS = ("http://standards-oui.ieee.org/oui/oui.csv",)
 RANDOMISED = "(randomised MAC)"
 
 
@@ -66,12 +72,23 @@ def update_oui(dest: Path, fetch=None, timeout: float = 60.0) -> int:
     """Download the IEEE registry into dest as TSV. `fetch` is injectable for tests."""
     if fetch is None:
         def fetch(url: str) -> str:
-            with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 fixed https url
+            req = urllib.request.Request(url, headers=FETCH_HEADERS)  # noqa: S310 fixed url
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 fixed url
                 return resp.read().decode("utf-8", errors="replace")
 
-    table = parse_ieee_csv(fetch(IEEE_CSV_URL))
+    errors: list[str] = []
+    table: dict[str, str] = {}
+    for url in (IEEE_CSV_URL, *FALLBACK_URLS):
+        try:
+            table = parse_ieee_csv(fetch(url))
+        except Exception as exc:  # network/HTTP errors vary widely; try the next source
+            errors.append(f"{url}: {exc}")
+            continue
+        if table:
+            break
+        errors.append(f"{url}: response was empty or not the IEEE CSV")
     if not table:
-        raise RuntimeError("downloaded OUI registry was empty or unrecognised; keeping existing data")
+        raise RuntimeError("could not download the vendor registry (" + "; ".join(errors) + "); keeping existing data")
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".tmp")
     tmp.write_text("".join(f"{k}\t{v}\n" for k, v in sorted(table.items())), encoding="utf-8")

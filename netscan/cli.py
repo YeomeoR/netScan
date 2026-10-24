@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
+import socket
 import sys
 import threading
 import time
@@ -15,10 +17,10 @@ from rich.table import Table
 
 from netscan import __version__
 from netscan.blocker import ArpEnforcer, BlockError, BlockManager, make_firewall
-from netscan.config import ConfigError, load_config, parse_subnets, render_config
+from netscan.config import ConfigError, load_config
 from netscan.net import ScapyTransport
 from netscan.oui import update_oui
-from netscan.runtime import Runtime, build_runtime, reverse_dns, sweep
+from netscan.runtime import Runtime, build_runtime, reverse_dns, sweep, write_initial_config
 from netscan.safety import NoticeNotAcceptedError, SafetyError, ensure_notice
 from netscan.store import Block, Device, Store
 
@@ -137,6 +139,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("daemon", help="run the Pi daemon (periodic sweeps, ARP watch, enforcement)")
     sub.add_parser("events", help="recent events")
     sub.add_parser("update-oui", help="download the latest IEEE vendor registry")
+    s = sub.add_parser("web", help="browser dashboard with the full feature set plus timed sweeps (the terminal commands keep working too)")
+    s.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; use 0.0.0.0 on the Pi to reach it from your LAN)")
+    s.add_argument("--port", type=int, default=8787)
+    s.add_argument("--token", default="", help="access token (default: $NETSCAN_WEB_TOKEN or <home>/web_token, created on first run)")
+    s.add_argument("--daemon", action="store_true", help="also run the daemon duties: baseline sweep, periodic sweep schedule, ARP watch, enforcer, optional capture")
+    s.add_argument("--open", action="store_true", help="open the dashboard in a browser")
+    s.add_argument("--demo", action="store_true", help="simulated network and throwaway data dir (no root, nothing real is touched)")
     return p
 
 
@@ -144,20 +153,11 @@ def cmd_init(args, cfg, transport) -> int:
     if cfg.config_path.exists() and not args.force:
         err.print(f"{cfg.config_path} already exists (use --force to overwrite)")
         return 1
-    subnets = args.subnet
-    local = transport.local_net(cfg.interface)
-    if not subnets:
-        subnets = [str(local.network)]
+    subnets, gw_mac, local = write_initial_config(cfg, transport, args.subnet, args.force)
+    if not args.subnet:
         console.print(f"Detected local network [bold]{local.network}[/] on {local.interface}")
-    parse_subnets(subnets)
-    try:
-        gw_mac = transport.resolve_mac(local.gateway_ip, local.interface) if local.gateway_ip else None
-    except Exception:  # noqa: BLE001 pinning is optional
-        gw_mac = None
     if gw_mac:
         console.print(f"Pinning gateway {local.gateway_ip} ({gw_mac}) so this config only works on this network")
-    cfg.config_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg.config_path.write_text(render_config(subnets, gw_mac or ""), encoding="utf-8")
     console.print(f"Wrote {cfg.config_path} with allow-list {subnets}")
     return 0
 
@@ -308,22 +308,69 @@ def cmd_events(args, cfg, transport) -> int:
 
 
 def cmd_update_oui(args, cfg, transport) -> int:
-    n = update_oui(cfg.oui_path)
+    try:
+        n = update_oui(cfg.oui_path)
+    except RuntimeError as exc:
+        console.print(f"[red]update-oui failed:[/red] {exc}")
+        return 1
     console.print(f"Saved {n} vendor prefixes to {cfg.oui_path}")
+    return 0
+
+
+def cmd_web(args, cfg, transport) -> int:
+    from netscan.web.controller import Controller
+    from netscan.web.server import load_or_create_token, make_server, serve_forever
+
+    setup_logging(args.verbose, plain=args.daemon)
+    resolver = reverse_dns
+    if args.demo:
+        from netscan.web.demo import demo_setup
+
+        cfg, transport, resolver = demo_setup()
+        console.print("[yellow]Demo mode:[/] simulated network, throwaway data in " + str(cfg.home))
+    elif not args.daemon:
+        need_root("ARP scanning, capture and blocking")
+    token = load_or_create_token(cfg.home, args.token or os.environ.get("NETSCAN_WEB_TOKEN", ""))
+    try:
+        controller = Controller(cfg, transport, daemon=args.daemon, resolver=resolver)
+        server = make_server(controller, args.host, args.port, token)
+    except OSError as exc:
+        err.print(f"[bold red]Cannot listen on {args.host}:{args.port}:[/] {exc}")
+        return 1
+    stop = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stop.set())
+    controller.start()
+    shown = args.host if args.host not in ("0.0.0.0", "") else socket.gethostname()
+    base = f"http://{shown}:{args.port}/"
+    if args.daemon:
+        logging.getLogger("netscan.web").info("dashboard on %s (access token in %s)", base, cfg.home / "web_token")
+    else:
+        console.print(f"Dashboard: [bold]{base}#token={token}[/]  (Ctrl-C to stop)")
+    if args.host not in ("127.0.0.1", "localhost"):
+        err.print("[yellow]Listening beyond this machine over plain HTTP: anyone on the network who learns the token can block devices. Keep it on your LAN.[/]")
+    if args.open:
+        import webbrowser
+
+        webbrowser.open(f"http://127.0.0.1:{args.port}/#token={token}" if args.host in ("0.0.0.0", "") else f"{base}#token={token}")
+    try:
+        serve_forever(server, stop)
+    finally:
+        controller.close()
     return 0
 
 
 COMMANDS = {
     "init": cmd_init, "scan": cmd_scan, "list": cmd_list, "show": cmd_show, "traffic": cmd_traffic,
     "block": cmd_block, "unblock": cmd_unblock, "blocks": cmd_blocks, "enforce": cmd_enforce,
-    "watch": cmd_watch, "daemon": cmd_daemon, "events": cmd_events, "update-oui": cmd_update_oui,
+    "watch": cmd_watch, "daemon": cmd_daemon, "events": cmd_events, "update-oui": cmd_update_oui, "web": cmd_web,
 }
 
 
 def main(argv: list[str] | None = None, transport=None, input_fn=input) -> int:
     args = build_parser().parse_args(argv)
     transport = transport or ScapyTransport()
-    if args.cmd != "daemon":
+    if args.cmd not in ("daemon", "web"):
         setup_logging(args.verbose)
     try:
         cfg = load_config(args.config, args.home)
@@ -331,7 +378,8 @@ def main(argv: list[str] | None = None, transport=None, input_fn=input) -> int:
             ensure_notice(cfg.notice_path, accept=args.accept_terms, input_fn=input_fn, out=sys.stdout)
             console.print("Notice acknowledged.")
             return 0
-        ensure_notice(cfg.notice_path, accept=args.accept_terms, input_fn=input_fn)
+        if not (args.cmd == "web" and args.demo):
+            ensure_notice(cfg.notice_path, accept=args.accept_terms, input_fn=input_fn)
         return COMMANDS[args.cmd](args, cfg, transport)
     except (SafetyError, NoticeNotAcceptedError) as exc:
         err.print(f"[bold red]Refused:[/] {exc}")

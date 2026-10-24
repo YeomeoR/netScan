@@ -208,6 +208,11 @@ class GuardedTransport:
     def local_ips(self) -> set[str]:
         return self._inner.local_ips()
 
+    def can_raw(self) -> bool:
+        """True when the wrapped transport can open raw sockets (fakes in tests always can)."""
+        check = getattr(self._inner, "is_root", None)
+        return bool(check()) if callable(check) else True
+
     def arp_sweep(self, network, interface, timeout):
         net = self._scope.check_network(network)
         return [h for h in self._inner.arp_sweep(net, interface, timeout) if self._scope.contains(h.ip)]

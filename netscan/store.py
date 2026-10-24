@@ -7,6 +7,7 @@ is picked up by the daemon's enforcer on its next cycle.
 from __future__ import annotations
 
 import ipaddress
+import json
 import sqlite3
 import threading
 import time
@@ -51,6 +52,33 @@ CREATE TABLE IF NOT EXISTS events (
     ip TEXT NOT NULL DEFAULT '',
     message TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    kind TEXT NOT NULL,
+    every_seconds INTEGER NOT NULL DEFAULT 0,
+    at_time TEXT NOT NULL DEFAULT '',
+    run_at REAL,
+    params TEXT NOT NULL DEFAULT '{}',
+    next_run REAL,
+    last_run REAL,
+    last_status TEXT NOT NULL DEFAULT '',
+    last_message TEXT NOT NULL DEFAULT '',
+    created REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    params TEXT NOT NULL DEFAULT '{}',
+    state TEXT NOT NULL,
+    created REAL NOT NULL,
+    started REAL,
+    finished REAL,
+    summary TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -72,6 +100,37 @@ class Block:
     method: str
     reason: str
     blocked_at: float
+
+
+@dataclass
+class Schedule:
+    id: int
+    name: str
+    enabled: bool
+    kind: str  # interval | daily | once
+    every_seconds: int
+    at_time: str
+    run_at: float | None
+    params: dict
+    next_run: float | None
+    last_run: float | None
+    last_status: str
+    last_message: str
+    created: float
+
+
+@dataclass
+class JobRow:
+    id: int
+    kind: str
+    source: str
+    params: dict
+    state: str  # queued | running | done | error | cancelled | interrupted
+    created: float
+    started: float | None
+    finished: float | None
+    summary: dict
+    error: str
 
 
 @dataclass
@@ -204,3 +263,97 @@ class Store:
 
     def recent_events(self, limit: int = 20) -> list[sqlite3.Row]:
         return self._all("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))
+
+    # schedules
+    @staticmethod
+    def _schedule(r: sqlite3.Row) -> Schedule:
+        return Schedule(
+            r["id"], r["name"], bool(r["enabled"]), r["kind"], r["every_seconds"], r["at_time"], r["run_at"],
+            json.loads(r["params"] or "{}"), r["next_run"], r["last_run"], r["last_status"], r["last_message"], r["created"],
+        )
+
+    def add_schedule(self, name: str, kind: str, every_seconds: int, at_time: str, run_at: float | None, params: dict, next_run: float | None, now: float | None = None) -> Schedule:
+        cur = self._exec(
+            """INSERT INTO schedules(name, enabled, kind, every_seconds, at_time, run_at, params, next_run, created)
+               VALUES (?,1,?,?,?,?,?,?,?)""",
+            (name, kind, every_seconds, at_time, run_at, json.dumps(params), next_run, now if now is not None else time.time()),
+        )
+        return self.get_schedule(cur.lastrowid)  # type: ignore[return-value]
+
+    def get_schedule(self, sid: int) -> Schedule | None:
+        rows = self._all("SELECT * FROM schedules WHERE id=?", (sid,))
+        return self._schedule(rows[0]) if rows else None
+
+    def list_schedules(self) -> list[Schedule]:
+        return [self._schedule(r) for r in self._all("SELECT * FROM schedules ORDER BY id")]
+
+    def update_schedule(self, sid: int, **fields) -> Schedule | None:
+        allowed = {"name", "enabled", "kind", "every_seconds", "at_time", "run_at", "params", "next_run", "last_run", "last_status", "last_message"}
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"cannot update {sorted(bad)}")
+        if not fields:
+            return self.get_schedule(sid)
+        if "params" in fields:
+            fields["params"] = json.dumps(fields["params"])
+        if "enabled" in fields:
+            fields["enabled"] = int(bool(fields["enabled"]))
+        sets = ", ".join(f"{k}=?" for k in fields)
+        self._exec(f"UPDATE schedules SET {sets} WHERE id=?", (*fields.values(), sid))
+        return self.get_schedule(sid)
+
+    def delete_schedule(self, sid: int) -> bool:
+        return self._exec("DELETE FROM schedules WHERE id=?", (sid,)).rowcount > 0
+
+    def due_schedules(self, now: float) -> list[Schedule]:
+        rows = self._all("SELECT * FROM schedules WHERE enabled=1 AND next_run IS NOT NULL AND next_run<=? ORDER BY next_run", (now,))
+        return [self._schedule(r) for r in rows]
+
+    # jobs
+    @staticmethod
+    def _job(r: sqlite3.Row) -> JobRow:
+        return JobRow(
+            r["id"], r["kind"], r["source"], json.loads(r["params"] or "{}"), r["state"], r["created"],
+            r["started"], r["finished"], json.loads(r["summary"] or "{}"), r["error"],
+        )
+
+    def add_job(self, kind: str, params: dict, source: str = "manual", now: float | None = None) -> JobRow:
+        cur = self._exec(
+            "INSERT INTO jobs(kind, source, params, state, created) VALUES (?,?,?,?,?)",
+            (kind, source, json.dumps(params), "queued", now if now is not None else time.time()),
+        )
+        return self.get_job(cur.lastrowid)  # type: ignore[return-value]
+
+    def get_job(self, jid: int) -> JobRow | None:
+        rows = self._all("SELECT * FROM jobs WHERE id=?", (jid,))
+        return self._job(rows[0]) if rows else None
+
+    def update_job(self, jid: int, **fields) -> JobRow | None:
+        allowed = {"state", "started", "finished", "summary", "error"}
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"cannot update {sorted(bad)}")
+        if "summary" in fields:
+            fields["summary"] = json.dumps(fields["summary"])
+        sets = ", ".join(f"{k}=?" for k in fields)
+        self._exec(f"UPDATE jobs SET {sets} WHERE id=?", (*fields.values(), jid))
+        return self.get_job(jid)
+
+    def recent_jobs(self, limit: int = 30) -> list[JobRow]:
+        return [self._job(r) for r in self._all("SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,))]
+
+    def active_jobs(self, source: str | None = None) -> list[JobRow]:
+        sql, args = "SELECT * FROM jobs WHERE state IN ('queued','running')", ()
+        if source is not None:
+            sql, args = sql + " AND source=?", (source,)
+        return [self._job(r) for r in self._all(sql + " ORDER BY id", args)]
+
+    def interrupt_stale_jobs(self, now: float | None = None) -> int:
+        """Jobs left queued/running by a crash or restart can never finish; close them out."""
+        return self._exec(
+            "UPDATE jobs SET state='interrupted', finished=?, error='interrupted by restart' WHERE state IN ('queued','running')",
+            (now if now is not None else time.time(),),
+        ).rowcount
+
+    def prune_jobs(self, keep: int = 200) -> None:
+        self._exec("DELETE FROM jobs WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM jobs) - ?", (keep,))

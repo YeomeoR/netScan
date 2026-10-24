@@ -114,3 +114,53 @@ def test_compute_local_network_honours_explicit_interface_when_vpn_owns_default_
     ]
     iface, ip, net, gw = compute_local_network(routes, "en0", lambda i: "192.168.1.10")
     assert (iface, str(net), gw) == ("en0", "192.168.1.0/24", ""), "network.interface must work without a default route on it"
+
+
+def test_update_oui_falls_back_when_primary_is_rejected(tmp_path):
+    seen = []
+
+    def fetch(url):
+        seen.append(url)
+        if url.startswith("https://"):
+            raise OSError("HTTP Error 418: Unknown Code")
+        return CSV
+
+    assert update_oui(tmp_path / "x.tsv", fetch=fetch) == 1
+    assert len(seen) == 2
+
+    def always_fail(url):
+        raise OSError("HTTP Error 418: Unknown Code")
+
+    with pytest.raises(RuntimeError, match="418"):
+        update_oui(tmp_path / "y.tsv", fetch=always_fail)
+    assert not (tmp_path / "y.tsv").exists()
+
+
+def test_default_fetch_sends_a_real_user_agent(tmp_path, monkeypatch):
+    import urllib.request
+
+    captured = {}
+
+    class Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return CSV.encode()
+
+    def fake_urlopen(req, timeout=None):
+        captured["ua"] = req.get_header("User-agent")
+        return Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert update_oui(tmp_path / "x.tsv") == 1
+    assert captured["ua"] and "Python-urllib" not in captured["ua"]
+
+
+def test_cli_update_oui_reports_failure_without_traceback(tmp_path, monkeypatch, capsys):
+    import netscan.cli as cli
+
+    def boom(dest, **kw):
+        raise RuntimeError("could not download the vendor registry (418)")
+
+    monkeypatch.setattr(cli, "update_oui", boom)
+    rc = cli.cmd_update_oui(None, type("C", (), {"oui_path": tmp_path / "o.tsv"})(), None)
+    assert rc == 1

@@ -117,6 +117,42 @@ notify_on = ["new_device", "device_offline", "ip_changed"]
 
 Terminal/journal logging is always on. Webhook/ntfy failures are logged and never stop the daemon. Only `http(s)` URLs are accepted.
 
+## Web dashboard (Mac and Pi, same GUI)
+
+`netscan web` serves a browser dashboard with the same functions as the terminal program: scan (timeout, hostnames), devices with vendor/hostname/first-last seen/online state, per-device detail and traffic metadata, block/unblock, traffic capture, OUI update, the event log, background services (ARP watch, ARP-cutoff enforcer), a read-only config view with a first-run `init`, and **timed sweeps**. The terminal commands are unchanged and remain a separate way to use the tool.
+
+The frontend is plain JavaScript (no build step, no npm); the server is Python stdlib, so nothing extra is installed.
+
+### On the Mac
+
+```bash
+netscan web --open                   # http://127.0.0.1:8787, only this Mac can connect
+sudo -E .venv/bin/netscan web        # root only needed for ARP sweep, watch, enforce and capture
+netscan web --demo                   # fake network and throwaway data, to look around safely
+```
+
+The URL printed includes `#token=...`; the token is stored at `~/.netscan/web_token` (mode 0600). Without root the dashboard still opens, but scans that need raw sockets report a clear error.
+
+### On the Pi
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/YeomeoR/netScan/main/deploy/install-pi.sh | sudo bash
+# or, from a clone:  sudo bash deploy/install-pi.sh
+```
+
+This installs the `netscan-web` systemd unit (daemon and dashboard in one process, unprivileged user, `CAP_NET_RAW`/`CAP_NET_ADMIN` only), prints `http://<pi-ip>:8787/#token=...`, and replaces the plain `netscan` daemon unit (they conflict, because both would run the same background work). Open that URL from your Mac or phone. On the Pi it starts a baseline sweep, re-applies persisted blocks, and seeds a "Periodic sweep" schedule from `daemon.sweep_interval`. To use the Mac's browser against the Pi's data you simply browse to the Pi; there is one source of truth.
+
+### Timed sweeps
+
+The **Schedule** tab creates sweeps that run on the machine hosting the dashboard (the Pi stays on, so it keeps sweeping with your browser closed). Kinds: every N seconds (30 s to 7 days), daily at HH:MM (the Pi's local time), or once. Each schedule stores its own parameters: timeout (1-30 s), resolve hostnames, mark-offline-after, optional traffic capture afterwards (up to an hour) and its flush interval. If the previous run of a schedule is still going, the next one is skipped and flagged rather than piling up. Jobs and schedules persist in the SQLite database; a restart marks interrupted jobs as such.
+
+### Dashboard security
+
+- Every `/api` call needs the bearer token (constant-time compare). Tokens come from `web_token` in the data dir, `--token`, or `$NETSCAN_WEB_TOKEN`.
+- The server is plain HTTP. On a LAN treat the token like a Wi-Fi password; do not port-forward it or expose it to the internet. For remote access use a VPN (WireGuard/Tailscale) or an SSH tunnel: `ssh -L 8787:127.0.0.1:8787 pi@<pi-ip>`, and bind the Pi to `--host 127.0.0.1`.
+- Default bind is `127.0.0.1`. Binding wider prints a warning. Loopback binds check the `Host` header (DNS-rebinding), there is no CORS, a strict CSP is set, and device names are rendered as text only.
+- The dashboard cannot widen the allow-list or touch the protected gateway/host: it uses the same scope and block guards as the CLI. Config is read-only there except first-run `init`.
+
 ## Configuration
 
 `~/.netscan/config.toml` (or `$NETSCAN_HOME`, or `--home`/`--config`). See [`config.example.toml`](config.example.toml). Key safety rules enforced at load time: the allow-list must be **private IPv4** and no larger than a `/16`; the host's detected network must sit inside it or every command refuses. `netscan init` also pins your router's MAC as `network.gateway_mac` when it can resolve it, because a CIDR alone cannot tell your `192.168.1.0/24` from a cafe's; if the gateway MAC differs, every command refuses. Keep that line (and re-run `init --force` if you replace the router).
@@ -131,7 +167,7 @@ pytest
 
 CI (`.github/workflows/ci.yml`) runs the suite on Python 3.10 and 3.12. All network I/O sits behind `netscan.net.Transport`; tests use a fake transport and scapy packets built in memory, so they need no root and touch no network. The suite covers parsing, allow-list refusal, protected-host refusal, block persistence/enforcement/restore, new-device detection, alerts, traffic metadata extraction and the CLI end to end.
 
-Layout: `netscan/safety.py` (scope guard + notice), `net.py` (wire I/O), `monitor.py` (inventory/events), `blocker.py`, `traffic.py`, `daemon.py`, `cli.py`, `store.py` (sqlite).
+Layout: `netscan/safety.py` (scope guard + notice), `net.py` (wire I/O), `monitor.py` (inventory/events), `blocker.py`, `traffic.py`, `daemon.py`, `cli.py`, `store.py` (sqlite), and `web/` (`controller.py` jobs/services/schedules, `schedule.py`, `server.py` JSON API, `demo.py`, `static/` the JS frontend).
 
 ## Licence / responsibility
 

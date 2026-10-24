@@ -25,6 +25,7 @@ include = ["netscan*"]
 
 [tool.setuptools.package-data]
 netscan = ["data/*.gz"]
+"netscan.web" = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

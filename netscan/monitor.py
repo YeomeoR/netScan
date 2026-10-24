@@ -52,15 +52,15 @@ class DeviceTracker:
         self.silent_baseline = silent_baseline
         self._lock = threading.Lock()  # sweep and ARP-watch threads must not both announce the same new device
 
-    def observe(self, hosts: Iterable[Host], now: float | None = None, allow_baseline: bool = False) -> list[Event]:
+    def observe(self, hosts: Iterable[Host], now: float | None = None, allow_baseline: bool = False, resolve_names: bool = True) -> list[Event]:
         with self._lock:
-            return self._observe(hosts, now, allow_baseline)
+            return self._observe(hosts, now, allow_baseline, resolve_names)
 
-    def _observe(self, hosts: Iterable[Host], now: float | None, allow_baseline: bool) -> list[Event]:
+    def _observe(self, hosts: Iterable[Host], now: float | None, allow_baseline: bool, resolve_names: bool = True) -> list[Event]:
         now = time.time() if now is None else now
         hosts = [h for h in hosts if self.scope.contains(h.ip)]  # never record anything outside the allow-list
         baseline = allow_baseline and self.silent_baseline and self.store.count_devices() == 0 and bool(hosts)
-        names = self._resolve_names(hosts)
+        names = self._resolve_names(hosts) if resolve_names else {}
         events: list[Event] = []
         for host in hosts:
             events.extend(self._observe_host(host, now, baseline, names.get(host.ip, "")))

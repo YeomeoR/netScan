@@ -30,8 +30,10 @@ from netscan.traffic import TrafficCollector, run_capture, service_name
 from netscan.web.errors import ApiError
 from netscan.portscan import port_info
 from netscan.web.features import FeatureMixin, display_name, meta_dict, presence_segments
+from netscan.spoof import Spoofer
 from netscan.update import Updater
 from netscan.web.rules import RuleEngine
+from netscan.web.macspoof import SpoofMixin
 from netscan.web.selfupdate import UpdateMixin
 from netscan.web.schedule import (
     Scheduler, initial_next_run, normalise_sweep_params, timing_changed, validate_schedule,
@@ -115,6 +117,10 @@ def describe_summary(kind: str, summary: dict) -> str:
         return f"{summary.get('prefixes', 0)} vendor prefixes"
     if kind == "update":
         return f"updated {summary.get('from')} to {summary.get('to')}" + (", restarting" if summary.get("restarting") else ", restart netScan to use it")
+    if kind == "spoof":
+        return f"{summary.get('interface')} now uses {summary.get('mac')}"
+    if kind == "unspoof":
+        return f"{summary.get('interface')} is back to {summary.get('mac')}"
     if kind == "dhcp":
         n, bad = summary.get("offers", 0), summary.get("problems", 0)
         return f"{n} DHCP server{'s' if n != 1 else ''} answered" + (f", {bad} problem{'s' if bad != 1 else ''} found" if bad else ", looks normal")
@@ -124,7 +130,7 @@ def describe_summary(kind: str, summary: dict) -> str:
     return ""
 
 
-class Controller(FeatureMixin, UpdateMixin):
+class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
     _device_dict = staticmethod(device_dict)
 
     def __init__(
@@ -138,6 +144,7 @@ class Controller(FeatureMixin, UpdateMixin):
         scheduler_tick: float = 1.0,
         rules_tick: float = 5.0,
         updater: Updater | None = None,
+        spoofer: Spoofer | None = None,
         update_tick: float = 300.0,
     ):
         self.cfg = cfg
@@ -162,6 +169,7 @@ class Controller(FeatureMixin, UpdateMixin):
         self._rules_tick = rules_tick
         self._rules_thread: threading.Thread | None = None
         self.updater = updater or Updater()
+        self.spoofer = spoofer or Spoofer(self.store)
         self._update_tick = update_tick
         self._update_thread: threading.Thread | None = None
         self.on_restart = None
@@ -178,6 +186,7 @@ class Controller(FeatureMixin, UpdateMixin):
         self.scheduler.start()
         self._rules_thread = threading.Thread(target=self._rules_loop, name="netscan-rules", daemon=True)
         self._rules_thread.start()
+        self.spoof_startup()
         self._update_thread = threading.Thread(target=self._update_loop, name="netscan-update", daemon=True)
         self._update_thread.start()
 
@@ -194,6 +203,7 @@ class Controller(FeatureMixin, UpdateMixin):
         while not self._closed.wait(self._rules_tick):
             try:
                 self.rule_engine.tick(self.clock())
+                self.spoof_tick()
             except Exception:  # noqa: BLE001 the timetable thread must outlive any single failure
                 log.exception("rule engine tick failed")
 
@@ -308,6 +318,7 @@ class Controller(FeatureMixin, UpdateMixin):
         return {
             "version": __version__,
             "boot_id": self.boot_id,
+            "spoof": self.spoof_status(),
             "now": now,
             "tz": time.strftime("%Z", time.localtime(now)),
             "utc_offset": -(time.altzone if time.localtime(now).tm_isdst > 0 else time.timezone),
@@ -495,6 +506,10 @@ class Controller(FeatureMixin, UpdateMixin):
                 summary = self._do_update_oui()
             elif job.kind == "update":
                 summary = self._do_update()
+            elif job.kind == "spoof":
+                summary = self._do_spoof(job.params)
+            elif job.kind == "unspoof":
+                summary = self._do_unspoof()
             elif job.kind == "dhcp":
                 summary = self._do_dhcp()
             elif job.kind == "ports":

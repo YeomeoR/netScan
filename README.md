@@ -162,6 +162,16 @@ None of this is exposed in the terminal commands yet; it lives in the same SQLit
 
 The **Schedule** tab creates sweeps that run on the machine hosting the dashboard (the Pi stays on, so it keeps sweeping with your browser closed). Kinds: every N seconds (30 s to 7 days), daily at HH:MM (the Pi's local time), or once. Each schedule stores its own parameters: timeout (1-30 s), resolve hostnames, mark-offline-after, optional traffic capture afterwards (up to an hour) and its flush interval. If the previous run of a schedule is still going, the next one is skipped and flagged rather than piling up. Jobs and schedules persist in the SQLite database; a restart marks interrupted jobs as such.
 
+### Temporarily changing this machine's MAC address
+
+**System > Temporary MAC address** (or `sudo netscan spoof set aa:bb:cc:dd:ee:ff --minutes 30`) makes the machine running netScan use another address on its network interface, then puts the real one back. Use it to see how your own network treats a particular device.
+
+- Only the interface netScan runs on is changed, never another device. A device's address in the database cannot be edited, because everything (names, blocks, rules) hangs off it.
+- The real address is stored first, so a restore works after netScan restarts. It returns when the time is up (15 minutes to 8 hours), from the button, with `netscan spoof restore`, and after a reboot.
+- Expect a few seconds without network and possibly a new IP address. The Pi's dashboard may not respond until the real address is back.
+- Refused: the router's address, multicast addresses, devices that are currently blocked, and (unless you confirm) a device that is online, since two machines with one address knock each other off.
+- Linux uses `ip link` and needs root or `CAP_NET_ADMIN` (the Pi service has it). macOS uses `ifconfig ... ether` and needs sudo; on Wi-Fi it often only works while Wi-Fi is on but not joined, and some newer Macs refuse it. This has only been tested against a simulated interface.
+
 ### Updating from GitHub
 
 The dashboard can pull your latest commits itself. **System > Updates** shows what is installed and whether GitHub has newer commits on the branch that is checked out; a banner appears on every tab when it does. It checks when you open or refresh the page (cached for a minute) and every 10 minutes while the page stays open. **Update now** (or `netscan update` in a terminal, `netscan update --check` to only look) does a fast-forward `git pull`, reinstalls into the same virtualenv, checks the new code imports, then restarts the dashboard in place; the page notices the restart and reloads itself. If the install or the import check fails, the checkout is rolled back to the previous commit.

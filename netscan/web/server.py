@@ -32,7 +32,7 @@ from netscan.web.errors import ApiError
 log = logging.getLogger("netscan.web.http")
 
 MAX_BODY = 64 * 1024
-STATIC_FILES = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/help.js": "help.js", "/extra.js": "extra.js", "/updates.js": "updates.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
+STATIC_FILES = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/help.js": "help.js", "/extra.js": "extra.js", "/updates.js": "updates.js", "/spoof.js": "spoof.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 
 
@@ -100,6 +100,9 @@ def build_routes(c: Controller) -> list[Route]:
         r("GET", "/api/update", lambda m, q, b: c.update_status(q.get("force", ["0"])[0] == "1")),
         r("PUT", "/api/update", lambda m, q, b: c.set_update_auto(b)),
         r("POST", "/api/update/apply", lambda m, q, b: c.submit_update()),
+        r("GET", "/api/spoof", lambda m, q, b: c.spoof_status()),
+        r("POST", "/api/spoof", lambda m, q, b: c.submit_spoof(b)),
+        r("POST", "/api/spoof/restore", lambda m, q, b: c.submit_unspoof()),
         r("GET", "/api/blocks", lambda m, q, b: c.blocks()),
         r("POST", "/api/block", lambda m, q, b: c.block(b)),
         r("POST", "/api/unblock", lambda m, q, b: c.unblock(b)),

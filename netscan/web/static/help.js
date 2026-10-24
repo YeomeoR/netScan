@@ -117,6 +117,19 @@ const SECTIONS = [
       h("p", {}, "On first run with no config, a card offers to detect your network and create it, pinning your router's MAC so the tool refuses to run on a different network by accident.")],
   },
   {
+    id: "spoof",
+    title: "Temporarily changing this machine's MAC address",
+    body: (h) => [
+      h("p", {}, "Under ", h("strong", {}, "System > Temporary MAC address"), " you can make the machine running netScan (the Mac or the Pi) use another address on its network card for 15 minutes to 8 hours, then put the real one back. Pick a known device or type an address."),
+      h("ul", {},
+        h("li", {}, "Only this machine's own interface changes. Other devices are never touched, and a device's record in netScan cannot be edited."),
+        h("li", {}, "The real address is saved first. It returns on its own when the time is up, from the button, with ", h("code", {}, "netscan spoof restore"), ", and after a reboot."),
+        h("li", {}, "Expect the connection to drop for a few seconds and the IP address to change. If you are viewing the Pi's dashboard from your phone, the page may stop responding until the real address is back."),
+        h("li", {}, "If the device you copy is online, both fight over the address, so switch it off first. The router's address and blocked devices are refused."),
+        h("li", {}, "Linux needs root or CAP_NET_ADMIN (the Pi service has it). macOS needs sudo, and on Wi-Fi it often only works while Wi-Fi is on but not joined; some newer Macs refuse it. Not available in demo mode.")),
+      h("p", {}, "In a terminal: ", h("code", {}, "sudo netscan spoof set aa:bb:cc:dd:ee:ff --minutes 30"), " holds it for that long (Ctrl-C restores early); ", h("code", {}, "netscan spoof status"), " and ", h("code", {}, "netscan spoof restore"), " do what they say.")],
+  },
+  {
     id: "updates",
     title: "Updating netScan from GitHub",
     body: (h) => [
@@ -151,6 +164,7 @@ const SECTIONS = [
           ["Activity > Events", "netscan events"],
           ["Vendor database > Update", "netscan update-oui"],
           ["System > Updates", "netscan update [--check]"],
+          ["System > Temporary MAC address", "netscan spoof set|status|restore"],
           ["Pi background service", "netscan daemon"],
           ["Names, owner, review, timers, presence, security checks, alert settings", "dashboard only (stored in the same database)"],
           ["Create config", "netscan init"],

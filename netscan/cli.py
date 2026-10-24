@@ -18,6 +18,7 @@ from rich.table import Table
 from netscan import __version__
 from netscan.blocker import ArpEnforcer, BlockError, BlockManager, make_firewall
 from netscan.config import ConfigError, load_config
+from netscan.macutil import normalise_mac
 from netscan.net import ScapyTransport
 from netscan.oui import update_oui
 from netscan.runtime import Runtime, build_runtime, reverse_dns, sweep, write_initial_config
@@ -142,6 +143,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("update", help="pull the latest netScan from GitHub into the checkout it was installed from and reinstall")
     s.add_argument("--check", action="store_true", help="only report whether a newer version exists")
     s.add_argument("--auto", choices=["on", "off"], help="switch automatic updates (applied by the running dashboard) on or off, then exit")
+    s = sub.add_parser("spoof", help="temporarily use another MAC address on this machine's network interface, then put the real one back")
+    s.add_argument("action", choices=["status", "set", "restore"])
+    s.add_argument("mac", nargs="?", help="address to use (for set)")
+    s.add_argument("--minutes", type=int, default=30, help="how long to keep it (default 30); netScan waits and restores it, Ctrl-C restores early")
+    s.add_argument("--yes", action="store_true", help="skip the confirmation question")
     s = sub.add_parser("web", help="browser dashboard with the full feature set plus timed sweeps (the terminal commands keep working too)")
     s.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; use 0.0.0.0 on the Pi to reach it from your LAN)")
     s.add_argument("--port", type=int, default=8787)
@@ -339,6 +345,8 @@ def cmd_web(args, cfg, transport) -> int:
 
         updater = Updater(disabled_reason="Updates are switched off in demo mode.") if args.demo else None
         controller = Controller(cfg, transport, daemon=args.daemon, resolver=resolver, updater=updater)
+        if args.demo:
+            controller.spoofer.disabled_reason = "Changing the MAC address is switched off in demo mode."
         server = make_server(controller, args.host, args.port, token)
     except OSError as exc:
         err.print(f"[bold red]Cannot listen on {args.host}:{args.port}:[/] {exc}")
@@ -405,10 +413,60 @@ def cmd_update(args, cfg, transport) -> int:
     return 0
 
 
+def cmd_spoof(args, cfg, transport) -> int:
+    from netscan.spoof import SpoofError, Spoofer
+
+    store = Store(cfg.db_path)
+    spoofer = Spoofer(store)
+    try:
+        if args.action == "status":
+            saved = spoofer.state()
+            if not saved:
+                console.print("This machine is using its own MAC address (netScan has not changed it).")
+            else:
+                left = max(0, int(saved["expires"] - time.time()))
+                console.print(f"{saved['interface']} uses [bold]{saved['spoofed']}[/]; the real address {saved['original']} returns in {left // 60}m (run `netscan spoof restore` to do it now).")
+            return 0
+        if args.action == "restore":
+            done = spoofer.restore()
+            console.print(f"[green]Restored[/] {done['interface']} to {done['original']}.")
+            return 0
+        if not args.mac:
+            err.print("give the MAC address to use: netscan spoof set aa:bb:cc:dd:ee:ff")
+            return 2
+        need_root("changing the MAC address")
+        local = transport.local_net(cfg.interface)
+        gateway = transport.resolve_mac(local.gateway_ip, local.interface) if local.gateway_ip else None
+        mac = spoofer.validate(args.mac, {m for m in (gateway, normalise_mac(cfg.gateway_mac)) if m})
+        dev = store.find_device(mac)
+        if dev and dev.online:
+            err.print(f"[yellow]{dev.hostname or dev.vendor or mac} is online. Two devices with one address knock each other off the network.[/]")
+        if not args.yes:
+            console.print(f"{local.interface} will use {mac} for {args.minutes} minutes and may drop off the network for a few seconds (the IP address can change).")
+            if input("Continue? [y/N] ").strip().lower() not in ("y", "yes"):
+                return 1
+        saved = spoofer.apply(local.interface, mac, args.minutes)
+        console.print(f"[bold]{local.interface} now uses {mac}.[/] The real address {saved['original']} comes back in {args.minutes} minutes. Press Ctrl-C to restore it now.")
+        try:
+            time.sleep(args.minutes * 60)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if spoofer.state():
+                done = spoofer.restore()
+                console.print(f"[green]Restored[/] {done['interface']} to {done['original']}.")
+        return 0
+    except SpoofError as exc:
+        err.print(f"[bold red]MAC change failed:[/] {exc}")
+        return 1
+    finally:
+        store.close()
+
+
 COMMANDS = {
     "init": cmd_init, "scan": cmd_scan, "list": cmd_list, "show": cmd_show, "traffic": cmd_traffic,
     "block": cmd_block, "unblock": cmd_unblock, "blocks": cmd_blocks, "enforce": cmd_enforce,
-    "watch": cmd_watch, "daemon": cmd_daemon, "events": cmd_events, "update-oui": cmd_update_oui, "web": cmd_web, "update": cmd_update,
+    "watch": cmd_watch, "daemon": cmd_daemon, "events": cmd_events, "update-oui": cmd_update_oui, "web": cmd_web, "update": cmd_update, "spoof": cmd_spoof,
 }
 
 

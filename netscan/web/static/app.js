@@ -2,6 +2,7 @@
 import { buildHelp } from "/help.js";
 import { createExtra } from "/extra.js";
 import { createUpdates } from "/updates.js";
+import { createSpoof } from "/spoof.js";
 // Every piece of data from the network (hostnames, vendors) is inserted with textContent via h(),
 // never innerHTML, so a device cannot inject markup into this page.
 
@@ -302,6 +303,7 @@ function trafficTable(rows) {
 }
 
 const updates = createUpdates({ h, clear, api, act, toast, state, ago, fmtTime, rerender: () => { if (shell) { updateShell(); views[state.tab].update(); } } });
+const spoof = createSpoof({ h, api, act, toast, state, fmtDur, fmtTime, label, rerender: () => { if (shell) views[state.tab].update(); } });
 const extra = createExtra({ h, clear, api, act, toast, modal, closeModal, field, state, ago, fmtTime, fmtDur, until, refresh: () => refresh(), openDevice: (m) => openDevice(m), label, isProtected });
 
 // ---------- views ----------
@@ -510,7 +512,7 @@ function describeSource(src) {
   if (src.startsWith("schedule:")) { const sc = state.schedules.find((x) => `schedule:${x.id}` === src); return sc ? sc.name : "schedule"; }
   return src;
 }
-const JOB_NAMES = { sweep: "Scan", traffic: "Capture", update_oui: "Vendor update", update: "Update", dhcp: "DHCP check", ports: "Port check" };
+const JOB_NAMES = { sweep: "Scan", traffic: "Capture", update_oui: "Vendor update", update: "Update", spoof: "MAC change", unspoof: "MAC restore", dhcp: "DHCP check", ports: "Port check" };
 function jobSummary(j) {
   const sm = j.summary || {};
   if (j.error) return j.error;
@@ -523,6 +525,8 @@ function jobSummary(j) {
   if (j.kind === "dhcp" && sm.offers !== undefined) return `${sm.offers} DHCP server${sm.offers === 1 ? "" : "s"} answered${sm.problems ? `, ${sm.problems} problem${sm.problems === 1 ? "" : "s"} found` : ", looks normal"}`;
   if (j.kind === "ports" && sm.devices !== undefined) return `${sm.devices} devices checked, ${sm.open} open ports${sm.findings ? `, ${sm.findings} new finding(s)` : ""}`;
   if (j.kind === "update" && sm.to) return `${sm.from} to ${sm.to}${sm.restarting ? ", restarting" : ", restart netScan to use it"}`;
+  if (j.kind === "spoof" && sm.mac) return `${sm.interface} now uses ${sm.mac}`;
+  if (j.kind === "unspoof" && sm.mac) return `${sm.interface} is back to ${sm.mac}`;
   if (j.kind === "update_oui" && sm.prefixes) return `${sm.prefixes} vendor prefixes`;
   return "";
 }
@@ -587,11 +591,11 @@ views.blocks = (() => {
 })();
 
 views.system = (() => {
-  let setup, services, tools, cfg, about, alertsBox, updatesBox;
+  let setup, services, tools, cfg, about, alertsBox, updatesBox, spoofBox;
   return {
     mount(root) {
-      setup = h("div"); services = h("div", { class: "card" }); tools = h("div", { class: "card" }); cfg = h("div", { class: "card" }); about = h("div", { class: "card" }); alertsBox = h("div"); updatesBox = h("div");
-      root.append(setup, h("div", { class: "grid2" }, services, tools), h("div", { class: "grid2" }, alertsBox, cfg), h("div", { class: "grid2" }, updatesBox, about));
+      setup = h("div"); services = h("div", { class: "card" }); tools = h("div", { class: "card" }); cfg = h("div", { class: "card" }); about = h("div", { class: "card" }); alertsBox = h("div"); updatesBox = h("div"); spoofBox = h("div");
+      root.append(setup, h("div", { class: "grid2" }, services, tools), h("div", { class: "grid2" }, alertsBox, cfg), h("div", { class: "grid2" }, updatesBox, about), h("div", { class: "grid2" }, spoofBox));
       extra.loadAlerts().then(() => this.update());
       updates.load(true).then(() => { if (state.tab === "system") { updateShell(); this.update(); } });
       api("GET", "/api/config").then((c) => { state.config = c; this.update(); }).catch(() => {});
@@ -616,6 +620,7 @@ views.system = (() => {
           h("button", { class: "btn", onclick: () => act(() => api("POST", "/api/refresh"), "Network re-detected") }, "Re-detect")));
       clear(alertsBox).append(extra.alertsCard());
       clear(updatesBox).append(updates.card());
+      if (!spoofBox.contains(document.activeElement)) clear(spoofBox).append(spoof.card());
       const c = state.config;
       clear(cfg).append(h("h2", {}, "Configuration (edit in config.toml)"));
       if (c) cfg.append(h("dl", { class: "kv" },

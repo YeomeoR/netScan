@@ -14,6 +14,13 @@ const state = {
 };
 
 // ---------- helpers ----------
+// Element.append turns null/undefined/false into the text "null"/"undefined"/"false", so conditional children
+// (`cond ? node : null`) passed straight to append() would print that word on the page. Drop them instead.
+const nativeAppend = Element.prototype.append;
+Element.prototype.append = function append(...nodes) {
+  return nativeAppend.apply(this, nodes.filter((n) => n !== null && n !== undefined && n !== false));
+};
+
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
@@ -303,7 +310,7 @@ function trafficTable(rows) {
 }
 
 const updates = createUpdates({ h, clear, api, act, toast, state, ago, fmtTime, rerender: () => { if (shell) { updateShell(); views[state.tab].update(); } } });
-const spoof = createSpoof({ h, api, act, toast, state, fmtDur, fmtTime, label, rerender: () => { if (shell) views[state.tab].update(); } });
+const spoof = createSpoof({ h, clear, api, act, toast, state, fmtDur, fmtTime, label, rerender: () => { if (shell) views[state.tab].update(); } });
 const extra = createExtra({ h, clear, api, act, toast, modal, closeModal, field, state, ago, fmtTime, fmtDur, until, refresh: () => refresh(), openDevice: (m) => openDevice(m), label, isProtected });
 
 // ---------- views ----------

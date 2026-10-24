@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from netscan.config import Config, load_config
-from netscan.net import LocalNet
+from netscan.net import DhcpOffer, LocalNet
 from netscan.parsing import Host
 from netscan.safety import record_acceptance
 from netscan.store import Store, TrafficRow
@@ -30,6 +30,16 @@ DEVICES = [
     Host("192.168.77.24", "94:a9:90:00:77:24"),  # Espressif
     Host("192.168.77.25", "7e:11:22:33:77:25"),  # randomised MAC
 ]
+IMPOSTOR = Host(DEVICES[1].ip, "de:ad:77:00:77:aa")  # answers for a taken address on the 6th sweep to demo ip_conflict
+ROGUE_DHCP_SERVER = Host("192.168.77.66", "02:aa:bb:cc:77:66")
+DEMO_OPEN_PORTS = {
+    GATEWAY.ip: [53, 80, 443, 1900],
+    "192.168.77.20": [22, 53, 80, 443],
+    "192.168.77.21": [8008, 8443],
+    "192.168.77.22": [554, 8080],
+    "192.168.77.24": [23, 80],
+    "192.168.77.99": [21, 80, 3389],
+}
 LATE_ARRIVAL = Host("192.168.77.99", "00:11:32:00:77:99")  # shows up on the 4th sweep to demo new-device alerts
 
 
@@ -37,6 +47,7 @@ class DemoTransport:
     def __init__(self, seed: int = 7):
         self.local = LocalNet("demo0", HOST.ip, HOST.mac, ipaddress.ip_network(NETWORK), GATEWAY.ip)
         self.sweeps = 0
+        self.dhcp_probes = 0
         self.sent: list[tuple] = []
         self._rng = random.Random(seed)
 
@@ -55,7 +66,20 @@ class DemoTransport:
         present = [GATEWAY] + [d for d in DEVICES if self._rng.random() > 0.15]
         if self.sweeps >= 4:
             present.append(LATE_ARRIVAL)
+        if self.sweeps == 6:
+            present.append(IMPOSTOR)
         return present
+
+    def dhcp_discover(self, interface, timeout):
+        self.dhcp_probes += 1
+        time.sleep(0.5)
+        offers = [DhcpOffer(GATEWAY.ip, GATEWAY.mac, "192.168.77.150", GATEWAY.ip, (GATEWAY.ip,), 86400)]
+        if self.dhcp_probes >= 2:  # the first probe looks healthy; later ones show a second server that plugged in
+            offers.append(DhcpOffer(ROGUE_DHCP_SERVER.ip, ROGUE_DHCP_SERVER.mac, "192.168.77.151", ROGUE_DHCP_SERVER.ip, ("203.0.113.53",), 600))
+        return offers
+
+    def port_connect(self, ip: str, port: int, timeout: float) -> bool:
+        return port in DEMO_OPEN_PORTS.get(ip, [])
 
     def send_arp_reply(self, interface, hwsrc, psrc, hwdst, pdst):
         self.sent.append((hwsrc, psrc, hwdst, pdst))

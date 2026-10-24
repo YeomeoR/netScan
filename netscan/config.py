@@ -27,12 +27,15 @@ def default_home() -> Path:
     return Path(os.environ.get("NETSCAN_HOME", "~/.netscan")).expanduser()
 
 
+DEFAULT_NOTIFY_ON = ("new_device", "ip_conflict", "arp_spoof", "rogue_dhcp", "port_opened")
+
+
 @dataclass
 class AlertConfig:
     webhook_url: str = ""
     ntfy_url: str = ""  # full topic url, e.g. https://ntfy.sh/my-private-topic
     ntfy_token: str = ""
-    notify_on: tuple[str, ...] = ("new_device",)
+    notify_on: tuple[str, ...] = DEFAULT_NOTIFY_ON
     timeout: float = 5.0
 
 
@@ -131,7 +134,7 @@ def load_config(path: Path | None = None, home: Path | None = None) -> Config:
             webhook_url=alerts.get("webhook_url", ""),
             ntfy_url=alerts.get("ntfy_url", ""),
             ntfy_token=alerts.get("ntfy_token", ""),
-            notify_on=tuple(alerts.get("notify_on", ["new_device"])),
+            notify_on=tuple(alerts.get("notify_on", list(DEFAULT_NOTIFY_ON))),
             timeout=float(alerts.get("timeout", 5.0)),
         ),
         daemon=DaemonConfig(
@@ -173,7 +176,9 @@ method = "arp"
 # webhook_url = "https://example.invalid/hook"
 # ntfy_url = "https://ntfy.sh/your-private-topic"
 # ntfy_token = ""
-notify_on = ["new_device"]   # also: "device_online", "device_offline", "ip_changed", "blocked", "unblocked"
+notify_on = ["new_device", "ip_conflict", "arp_spoof", "rogue_dhcp", "port_opened"]
+# also: "device_online", "device_offline", "ip_changed", "blocked", "unblocked"
+# the dashboard (System > Alerts) can override these settings; dashboard values win
 
 [daemon]
 sweep_interval = 300   # seconds between automated sweeps

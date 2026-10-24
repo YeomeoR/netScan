@@ -26,12 +26,13 @@ from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 from netscan.safety import SafetyError
-from netscan.web.controller import ApiError, Controller
+from netscan.web.controller import Controller
+from netscan.web.errors import ApiError
 
 log = logging.getLogger("netscan.web.http")
 
 MAX_BODY = 64 * 1024
-STATIC_FILES = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
+STATIC_FILES = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/help.js": "help.js", "/extra.js": "extra.js", "/updates.js": "updates.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 
 
@@ -79,9 +80,26 @@ def build_routes(c: Controller) -> list[Route]:
         r("POST", "/api/init", lambda m, q, b: c.init_config(b)),
         r("GET", "/api/devices", lambda m, q, b: c.devices()),
         r("GET", r"/api/devices/(?P<ident>[^/]+)", lambda m, q, b: c.device_detail(unquote(m["ident"]))),
+        r("PUT", r"/api/devices/(?P<ident>[^/]+)/meta", lambda m, q, b: c.set_meta(unquote(m["ident"]), b)),
+        r("POST", "/api/devices/review", lambda m, q, b: c.review(b)),
+        r("GET", "/api/alerts", lambda m, q, b: c.alerts_view()),
+        r("PUT", "/api/alerts", lambda m, q, b: c.update_alerts(b)),
+        r("POST", "/api/alerts/test", lambda m, q, b: c.test_alerts()),
+        r("GET", "/api/rules", lambda m, q, b: c.rules()),
+        r("POST", "/api/rules", lambda m, q, b: c.create_rule(b)),
+        r("POST", "/api/rules/quick", lambda m, q, b: c.quick_block(b)),
+        r("PUT", r"/api/rules/(?P<id>\d+)", lambda m, q, b: c.update_rule(int(m["id"]), b)),
+        r("DELETE", r"/api/rules/(?P<id>\d+)", lambda m, q, b: c.delete_rule(int(m["id"]))),
+        r("GET", "/api/presence", lambda m, q, b: c.presence(_float_query(q, "hours", 24), q.get("all", ["0"])[0] == "1")),
+        r("GET", "/api/security", lambda m, q, b: c.security()),
+        r("POST", "/api/security/dhcp-probe", lambda m, q, b: c.submit_dhcp_probe()),
+        r("POST", "/api/security/ports", lambda m, q, b: c.submit_ports(b)),
         r("POST", "/api/scan", lambda m, q, b: c.submit_scan(b)),
         r("POST", "/api/traffic", lambda m, q, b: c.submit_traffic(b)),
         r("POST", "/api/update-oui", lambda m, q, b: c.submit_update_oui()),
+        r("GET", "/api/update", lambda m, q, b: c.update_status(q.get("force", ["0"])[0] == "1")),
+        r("PUT", "/api/update", lambda m, q, b: c.set_update_auto(b)),
+        r("POST", "/api/update/apply", lambda m, q, b: c.submit_update()),
         r("GET", "/api/blocks", lambda m, q, b: c.blocks()),
         r("POST", "/api/block", lambda m, q, b: c.block(b)),
         r("POST", "/api/unblock", lambda m, q, b: c.unblock(b)),
@@ -103,6 +121,13 @@ def _int_query(q: dict, key: str, default: int) -> int:
         return int(q.get(key, [default])[0])
     except (TypeError, ValueError):
         raise ApiError(400, f"{key} must be a whole number") from None
+
+
+def _float_query(q: dict, key: str, default: float) -> float:
+    try:
+        return float(q.get(key, [default])[0])
+    except (TypeError, ValueError):
+        raise ApiError(400, f"{key} must be a number") from None
 
 
 def make_handler(controller: Controller, token: str, loopback_only: bool):

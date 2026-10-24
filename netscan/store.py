@@ -79,6 +79,42 @@ CREATE TABLE IF NOT EXISTS jobs (
     summary TEXT NOT NULL DEFAULT '{}',
     error TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS device_meta (
+    mac TEXT PRIMARY KEY,
+    label TEXT NOT NULL DEFAULT '',
+    owner TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    trust TEXT NOT NULL DEFAULT 'unknown',
+    notes TEXT NOT NULL DEFAULT '',
+    track INTEGER NOT NULL DEFAULT 0,
+    alert TEXT NOT NULL DEFAULT 'default',
+    updated REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS block_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    macs TEXT NOT NULL DEFAULT '[]',
+    days TEXT NOT NULL DEFAULT '[]',
+    start TEXT NOT NULL DEFAULT '',
+    end TEXT NOT NULL DEFAULT '',
+    until REAL,
+    held TEXT NOT NULL DEFAULT '[]',
+    active INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT '',
+    created REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS port_scans (
+    mac TEXT PRIMARY KEY,
+    ip TEXT NOT NULL,
+    ts REAL NOT NULL,
+    open TEXT NOT NULL DEFAULT '[]'
+);
 """
 
 
@@ -131,6 +167,36 @@ class JobRow:
     finished: float | None
     summary: dict
     error: str
+
+
+@dataclass
+class DeviceMeta:
+    mac: str
+    label: str = ""
+    owner: str = ""
+    category: str = ""
+    trust: str = "unknown"  # unknown (not reviewed yet) | known | guest
+    notes: str = ""
+    track: bool = False  # show in "who is home"
+    alert: str = "default"  # default | always | mute
+    updated: float = 0.0
+
+
+@dataclass
+class BlockRule:
+    id: int
+    name: str
+    kind: str  # window (weekly timetable) | timer (block until a moment)
+    enabled: bool
+    macs: list
+    days: list  # 0=Monday .. 6=Sunday
+    start: str
+    end: str
+    until: float | None
+    held: list  # macs this rule blocked itself, and so will release
+    active: bool
+    note: str
+    created: float
 
 
 @dataclass
@@ -255,6 +321,16 @@ class Store:
         return {r["mac"]: (r["b"], r["p"]) for r in rows}
 
     # events
+    def has_recent_event(self, kind: str, ip: str, message: str, since: float) -> bool:
+        return bool(self._all("SELECT 1 FROM events WHERE kind=? AND ip=? AND message=? AND ts>=? LIMIT 1", (kind, ip, message, since)))
+
+    def events_for_mac(self, mac: str, limit: int = 2000) -> list[sqlite3.Row]:
+        return self._all("SELECT * FROM events WHERE mac=? ORDER BY id ASC LIMIT ?", (mac, limit))
+
+    def events_of_kinds(self, kinds: tuple[str, ...], limit: int = 100) -> list[sqlite3.Row]:
+        marks = ",".join("?" for _ in kinds)
+        return self._all(f"SELECT * FROM events WHERE kind IN ({marks}) ORDER BY id DESC LIMIT ?", (*kinds, limit))
+
     def add_event(self, kind: str, mac: str = "", ip: str = "", message: str = "", now: float | None = None) -> None:
         self._exec(
             "INSERT INTO events(ts, kind, mac, ip, message) VALUES (?,?,?,?,?)",
@@ -357,3 +433,98 @@ class Store:
 
     def prune_jobs(self, keep: int = 200) -> None:
         self._exec("DELETE FROM jobs WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM jobs) - ?", (keep,))
+
+
+    # settings (small JSON blobs edited from the dashboard)
+    def get_setting(self, key: str, default=None):
+        rows = self._all("SELECT value FROM settings WHERE key=?", (key,))
+        if not rows:
+            return default
+        try:
+            return json.loads(rows[0]["value"])
+        except json.JSONDecodeError:
+            return default
+
+    def set_setting(self, key: str, value) -> None:
+        self._exec("INSERT INTO settings(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value)))
+
+    # device metadata
+    @staticmethod
+    def _meta(r: sqlite3.Row) -> DeviceMeta:
+        return DeviceMeta(r["mac"], r["label"], r["owner"], r["category"], r["trust"], r["notes"], bool(r["track"]), r["alert"], r["updated"])
+
+    def get_meta(self, mac: str) -> DeviceMeta:
+        rows = self._all("SELECT * FROM device_meta WHERE mac=?", (mac,))
+        return self._meta(rows[0]) if rows else DeviceMeta(mac)
+
+    def list_meta(self) -> dict[str, DeviceMeta]:
+        return {r["mac"]: self._meta(r) for r in self._all("SELECT * FROM device_meta")}
+
+    META_FIELDS = ("label", "owner", "category", "trust", "notes", "track", "alert")
+
+    def set_meta(self, mac: str, now: float | None = None, **fields) -> DeviceMeta:
+        bad = set(fields) - set(self.META_FIELDS)
+        if bad:
+            raise ValueError(f"unknown meta fields {sorted(bad)}")
+        cur = self.get_meta(mac)
+        for k, v in fields.items():
+            setattr(cur, k, v)
+        self._exec(
+            """INSERT INTO device_meta(mac, label, owner, category, trust, notes, track, alert, updated) VALUES (?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(mac) DO UPDATE SET label=excluded.label, owner=excluded.owner, category=excluded.category,
+                 trust=excluded.trust, notes=excluded.notes, track=excluded.track, alert=excluded.alert, updated=excluded.updated""",
+            (mac, cur.label, cur.owner, cur.category, cur.trust, cur.notes, int(cur.track), cur.alert, now if now is not None else time.time()),
+        )
+        return self.get_meta(mac)
+
+    # block rules (timetables and timers)
+    @staticmethod
+    def _rule(r: sqlite3.Row) -> BlockRule:
+        return BlockRule(
+            r["id"], r["name"], r["kind"], bool(r["enabled"]), json.loads(r["macs"]), json.loads(r["days"]), r["start"], r["end"],
+            r["until"], json.loads(r["held"]), bool(r["active"]), r["note"], r["created"],
+        )
+
+    def add_rule(self, name: str, kind: str, macs: list, days: list, start: str, end: str, until: float | None, enabled: bool = True, now: float | None = None) -> BlockRule:
+        cur = self._exec(
+            "INSERT INTO block_rules(name, kind, enabled, macs, days, start, end, until, created) VALUES (?,?,?,?,?,?,?,?,?)",
+            (name, kind, int(enabled), json.dumps(macs), json.dumps(days), start, end, until, now if now is not None else time.time()),
+        )
+        return self.get_rule(cur.lastrowid)  # type: ignore[return-value]
+
+    def get_rule(self, rid: int) -> BlockRule | None:
+        rows = self._all("SELECT * FROM block_rules WHERE id=?", (rid,))
+        return self._rule(rows[0]) if rows else None
+
+    def list_rules(self) -> list[BlockRule]:
+        return [self._rule(r) for r in self._all("SELECT * FROM block_rules ORDER BY id")]
+
+    RULE_FIELDS = {"name", "kind", "enabled", "macs", "days", "start", "end", "until", "held", "active", "note"}
+
+    def update_rule(self, rid: int, **fields) -> BlockRule | None:
+        bad = set(fields) - self.RULE_FIELDS
+        if bad:
+            raise ValueError(f"unknown rule fields {sorted(bad)}")
+        if fields:
+            enc = {k: (json.dumps(v) if k in ("macs", "days", "held") else int(v) if k in ("enabled", "active") else v) for k, v in fields.items()}
+            self._exec(f"UPDATE block_rules SET {', '.join(f'{k}=?' for k in enc)} WHERE id=?", (*enc.values(), rid))
+        return self.get_rule(rid)
+
+    def delete_rule(self, rid: int) -> bool:
+        return self._exec("DELETE FROM block_rules WHERE id=?", (rid,)).rowcount > 0
+
+    # open-port scan results (latest per device)
+    def get_port_scan(self, mac: str) -> dict | None:
+        rows = self._all("SELECT * FROM port_scans WHERE mac=?", (mac,))
+        if not rows:
+            return None
+        return {"mac": mac, "ip": rows[0]["ip"], "ts": rows[0]["ts"], "open": json.loads(rows[0]["open"])}
+
+    def set_port_scan(self, mac: str, ip: str, open_ports: list, now: float | None = None) -> None:
+        self._exec(
+            "INSERT INTO port_scans(mac, ip, ts, open) VALUES (?,?,?,?) ON CONFLICT(mac) DO UPDATE SET ip=excluded.ip, ts=excluded.ts, open=excluded.open",
+            (mac, ip, now if now is not None else time.time(), json.dumps(open_ports)),
+        )
+
+    def list_port_scans(self) -> list[dict]:
+        return [{"mac": r["mac"], "ip": r["ip"], "ts": r["ts"], "open": json.loads(r["open"])} for r in self._all("SELECT * FROM port_scans")]

@@ -25,6 +25,7 @@ class FakeTransport:
         self.sent: list[tuple] = []
         self.sweeps: list = []
         self.sniffed: list = []
+        self.dhcp_offers: list = []
 
     def local_net(self, interface=""):
         return self.local
@@ -41,6 +42,9 @@ class FakeTransport:
 
     def resolve_mac(self, ip, interface):
         return self.macs.get(ip)
+
+    def dhcp_discover(self, interface, timeout):
+        return list(self.dhcp_offers)
 
     def sniff(self, interface, bpf, callback, stop):
         for pkt in self.sniffed:

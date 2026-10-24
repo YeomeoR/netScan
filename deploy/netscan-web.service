@@ -20,7 +20,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/netscan
+# /opt/netScan must be writable so the dashboard can update itself from GitHub (git pull + pip install)
+ReadWritePaths=/var/lib/netscan /opt/netScan
 StateDirectory=netscan
 User=netscan
 Group=netscan

@@ -20,6 +20,13 @@ IP_CHANGED = "ip_changed"
 BLOCKED = "blocked"
 UNBLOCKED = "unblocked"
 BASELINE = "baseline"
+IP_CONFLICT = "ip_conflict"
+ARP_SPOOF = "arp_spoof"
+ROGUE_DHCP = "rogue_dhcp"
+PORT_OPENED = "port_opened"
+SECURITY_KINDS = (IP_CONFLICT, ARP_SPOOF, ROGUE_DHCP, PORT_OPENED)
+ALERTABLE_KINDS = (NEW_DEVICE, DEVICE_ONLINE, DEVICE_OFFLINE, IP_CHANGED, BLOCKED, UNBLOCKED, *SECURITY_KINDS)
+SECURITY_DEDUPE_SECONDS = 6 * 3600
 
 
 @dataclass
@@ -114,3 +121,30 @@ class DeviceTracker:
                 self.store.add_event(ev.kind, ev.mac, ev.ip, ev.message, now)
                 events.append(ev)
         return events
+
+    def security_event(self, kind: str, message: str, mac: str = "", ip: str = "", now: float | None = None, dedupe: float = SECURITY_DEDUPE_SECONDS) -> Event | None:
+        """Record a security finding unless the same one was already raised recently."""
+        now = time.time() if now is None else now
+        with self._lock:
+            if self.store.has_recent_event(kind, ip, message, now - dedupe):
+                return None
+            dev = self.store.get_device(mac) if mac else None
+            ev = Event(kind, mac, ip, message, dev.vendor if dev else "", dev.hostname if dev else "")
+            self.store.add_event(kind, mac, ip, message, now)
+            return ev
+
+    def check_conflicts(self, pairs: Iterable[tuple[str, str]], now: float | None = None) -> list[Event]:
+        """pairs are (ip, mac) seen in one sweep; one ip answered by several macs is a conflict."""
+        by_ip: dict[str, set[str]] = {}
+        for ip, mac in pairs:
+            if self.scope.contains(ip):
+                by_ip.setdefault(ip, set()).add(mac)
+        out = []
+        for ip, macs in sorted(by_ip.items()):
+            if len(macs) < 2:
+                continue
+            listed = ", ".join(sorted(macs))
+            ev = self.security_event(IP_CONFLICT, f"{ip} is claimed by several devices ({listed}): duplicate address or spoofing", mac=sorted(macs)[0], ip=ip, now=now)
+            if ev:
+                out.append(ev)
+        return out

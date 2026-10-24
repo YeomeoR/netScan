@@ -139,6 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("daemon", help="run the Pi daemon (periodic sweeps, ARP watch, enforcement)")
     sub.add_parser("events", help="recent events")
     sub.add_parser("update-oui", help="download the latest IEEE vendor registry")
+    s = sub.add_parser("update", help="pull the latest netScan from GitHub into the checkout it was installed from and reinstall")
+    s.add_argument("--check", action="store_true", help="only report whether a newer version exists")
+    s.add_argument("--auto", choices=["on", "off"], help="switch automatic updates (applied by the running dashboard) on or off, then exit")
     s = sub.add_parser("web", help="browser dashboard with the full feature set plus timed sweeps (the terminal commands keep working too)")
     s.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; use 0.0.0.0 on the Pi to reach it from your LAN)")
     s.add_argument("--port", type=int, default=8787)
@@ -332,14 +335,19 @@ def cmd_web(args, cfg, transport) -> int:
         need_root("ARP scanning, capture and blocking")
     token = load_or_create_token(cfg.home, args.token or os.environ.get("NETSCAN_WEB_TOKEN", ""))
     try:
-        controller = Controller(cfg, transport, daemon=args.daemon, resolver=resolver)
+        from netscan.update import Updater
+
+        updater = Updater(disabled_reason="Updates are switched off in demo mode.") if args.demo else None
+        controller = Controller(cfg, transport, daemon=args.daemon, resolver=resolver, updater=updater)
         server = make_server(controller, args.host, args.port, token)
     except OSError as exc:
         err.print(f"[bold red]Cannot listen on {args.host}:{args.port}:[/] {exc}")
         return 1
     stop = threading.Event()
+    restart = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
+    controller.on_restart = lambda: (restart.set(), stop.set())
     controller.start()
     shown = args.host if args.host not in ("0.0.0.0", "") else socket.gethostname()
     base = f"http://{shown}:{args.port}/"
@@ -357,13 +365,50 @@ def cmd_web(args, cfg, transport) -> int:
         serve_forever(server, stop)
     finally:
         controller.close()
+    if restart.is_set():
+        logging.getLogger("netscan.web").info("restarting to run the updated code")
+        sys.stdout.flush()
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+    return 0
+
+
+def cmd_update(args, cfg, transport) -> int:
+    from netscan.update import UpdateError, Updater
+
+    if args.auto:
+        store = Store(cfg.db_path)
+        try:
+            store.set_setting("update", {"auto": args.auto == "on"})
+        finally:
+            store.close()
+        console.print(f"Automatic updates are {args.auto}. The running dashboard follows GitHub every few minutes while this is on.")
+        return 0
+    up = Updater()
+    info = up.check(force=True)
+    if not info["supported"]:
+        err.print(f"[red]Cannot update:[/red] {info['reason']}")
+        return 1
+    if info["error"]:
+        err.print(f"[red]{info['error']}[/red]")
+        return 1
+    console.print(f"On [bold]{info['branch']}[/bold] at {info['commit']} ({info['subject']}); {info['behind']} new commit(s) on GitHub.")
+    for c in info["new_commits"]:
+        console.print(f"  {c['sha']}  {c['subject']}")
+    if args.check or not info["behind"]:
+        return 0
+    try:
+        done = up.apply()
+    except UpdateError as exc:
+        err.print(f"[red]Update failed:[/red] {exc}")
+        return 1
+    console.print(f"[green]Updated {done['from']} to {done['to']}.[/green] Restart the dashboard (or the netscan-web service) to use it.")
     return 0
 
 
 COMMANDS = {
     "init": cmd_init, "scan": cmd_scan, "list": cmd_list, "show": cmd_show, "traffic": cmd_traffic,
     "block": cmd_block, "unblock": cmd_unblock, "blocks": cmd_blocks, "enforce": cmd_enforce,
-    "watch": cmd_watch, "daemon": cmd_daemon, "events": cmd_events, "update-oui": cmd_update_oui, "web": cmd_web,
+    "watch": cmd_watch, "daemon": cmd_daemon, "events": cmd_events, "update-oui": cmd_update_oui, "web": cmd_web, "update": cmd_update,
 }
 
 

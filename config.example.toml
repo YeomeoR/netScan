@@ -20,7 +20,9 @@ method = "arp"
 # webhook_url = "https://example.invalid/hook"
 # ntfy_url = "https://ntfy.sh/your-private-topic"
 # ntfy_token = ""
-notify_on = ["new_device"]   # also: "device_online", "device_offline", "ip_changed", "blocked", "unblocked"
+notify_on = ["new_device", "ip_conflict", "arp_spoof", "rogue_dhcp", "port_opened"]
+# also: "device_online", "device_offline", "ip_changed", "blocked", "unblocked"
+# The dashboard (System > Alerts) can override all of this; "Reset to config file" removes the overrides.
 
 [daemon]
 sweep_interval = 300   # seconds between automated sweeps

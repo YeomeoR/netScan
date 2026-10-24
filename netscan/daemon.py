@@ -8,6 +8,7 @@ import threading
 
 from netscan.blocker import DEAD_MAC, ArpEnforcer, BlockManager, make_firewall
 from netscan.runtime import Runtime, sweep
+from netscan.security import check_gateway_claim
 from netscan.traffic import TrafficCollector, run_capture
 
 log = logging.getLogger("netscan.daemon")
@@ -47,6 +48,12 @@ class Daemon:
         if not mac or mac == DEAD_MAC or (mac == self.rt.local.mac and arp.psrc != self.rt.local.ip):
             return
         try:
+            spoof = check_gateway_claim(self.rt, arp.psrc, mac)
+            if arp.psrc == self.rt.scope.gateway_ip and self.rt.gateway_mac and mac != self.rt.gateway_mac:
+                # report it and do not record the gateway's address against the impostor
+                if spoof:
+                    self.rt.alerter.dispatch([spoof])
+                return
             events = self.rt.tracker.observe_one(arp.psrc, mac)
         except Exception:  # noqa: BLE001
             log.exception("ARP watch failed to process a frame")

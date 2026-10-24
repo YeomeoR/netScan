@@ -75,7 +75,7 @@ def make_ctl(home, transport=None, **kw):
     from netscan.config import load_config
 
     cfg = load_config(None, home)
-    return Controller(cfg, transport or FakeTransport(), resolver=lambda ip: f"host-{ip.rsplit('.', 1)[1]}", scheduler_tick=3600, **kw)
+    return Controller(cfg, transport or FakeTransport(), resolver=lambda ip: f"host-{ip.rsplit('.', 1)[1]}", scheduler_tick=3600, rules_tick=3600, **kw)
 
 
 @pytest.fixture
@@ -110,7 +110,7 @@ def test_api_requires_the_token_but_static_files_do_not(api):
     assert api.get("/api/status")[0] == 200
     status, body = api.get("/", token=None)
     assert status == 200 and b"<title>netScan</title>" in body
-    assert api.get("/app.js", token=None)[0] == 200 and api.get("/style.css", token=None)[0] == 200
+    assert api.get("/app.js", token=None)[0] == 200 and api.get("/style.css", token=None)[0] == 200 and api.get("/help.js", token=None)[0] == 200
 
 
 def test_static_server_serves_only_whitelisted_files(api):
@@ -157,7 +157,7 @@ def test_scan_job_populates_devices_and_summary(api):
     phone = next(d for d in devices if d["ip"] == PHONE.ip)
     assert phone["vendor"] == "Raspberry Pi Foundation" and phone["online"] and not phone["blocked"]
     _, status = api.get("/api/status")
-    assert status["counts"] == {"devices": 4, "online": 4, "offline": 0, "blocked": 0}
+    assert status["counts"] == {"devices": 4, "online": 4, "offline": 0, "blocked": 0, "unreviewed": 4, "rules_active": 0}
     assert status["ready"] and status["network"]["network"] == "192.168.1.0/24" and status["privileged"]
 
 

@@ -25,6 +25,16 @@ from netscan.safety import Scope
 log = logging.getLogger("netscan.net")
 
 @dataclass(frozen=True)
+class DhcpOffer:
+    server_ip: str
+    server_mac: str
+    offered_ip: str = ""
+    router: str = ""
+    dns: tuple[str, ...] = ()
+    lease: int = 0
+
+
+@dataclass(frozen=True)
 class LocalNet:
     interface: str
     ip: str
@@ -40,6 +50,7 @@ class Transport(Protocol):
     def resolve_mac(self, ip: str, interface: str) -> str | None: ...
     def sniff(self, interface: str, bpf: str, callback: Callable, stop: threading.Event) -> None: ...
     def local_ips(self) -> set[str]: ...
+    def dhcp_discover(self, interface: str, timeout: float) -> list[DhcpOffer]: ...
 
 
 def compute_local_network(routes, interface: str, ip_for_iface: Callable[[str], str]) -> tuple[str, str, ipaddress.IPv4Network, str]:
@@ -136,7 +147,7 @@ class ScapyTransport:
             for _sent, rcv in answered:
                 mac = normalise_mac(rcv.hwsrc)
                 if mac:
-                    hosts[rcv.psrc] = Host(rcv.psrc, mac)
+                    hosts[(rcv.psrc, mac)] = Host(rcv.psrc, mac)  # keep every (ip, mac) pair so duplicate-ip conflicts stay visible
             return list(hosts.values())
         return self._nudge_sweep(network, timeout)
 
@@ -154,6 +165,40 @@ class ScapyTransport:
             sock.close()
         time.sleep(min(max(timeout, 1.0), 4.0))
         return [h for h in read_os_neighbours() if ipaddress.ip_address(h.ip) in network]
+
+    def dhcp_discover(self, interface: str, timeout: float) -> list[DhcpOffer]:
+        """Broadcast one DHCPDISCOVER and collect every OFFER. Requests no lease, so nothing is configured anywhere."""
+        if not self.is_root():
+            raise PermissionError("the DHCP check needs root or CAP_NET_RAW")
+        import random
+
+        from scapy.all import BOOTP, DHCP, IP, UDP, Ether, get_if_hwaddr, srp
+
+        from netscan.macutil import normalise_mac
+
+        mac = get_if_hwaddr(interface)
+        pkt = (
+            Ether(src=mac, dst="ff:ff:ff:ff:ff:ff")
+            / IP(src="0.0.0.0", dst="255.255.255.255")
+            / UDP(sport=68, dport=67)
+            / BOOTP(chaddr=bytes.fromhex(mac.replace(":", "")), xid=random.randint(1, 2**32 - 1), flags=0x8000)
+            / DHCP(options=[("message-type", "discover"), "end"])
+        )
+        answered, _ = srp(pkt, iface=interface, timeout=timeout, multi=True, verbose=False, promisc=False)
+        offers: dict[tuple[str, str], DhcpOffer] = {}
+        for _sent, rcv in answered:
+            if not rcv.haslayer(DHCP):
+                continue
+            opts = {o[0]: o[1:] for o in rcv[DHCP].options if isinstance(o, tuple)}
+            if opts.get("message-type", (0,))[0] != 2:
+                continue
+            server_ip = str(opts["server_id"][0]) if "server_id" in opts else str(rcv[IP].src)
+            smac = normalise_mac(rcv[Ether].src) or ""
+            router = str(opts["router"][0]) if opts.get("router") else ""
+            dns = tuple(str(x) for x in opts.get("name_server", ()))
+            lease = int(opts["lease_time"][0]) if opts.get("lease_time") else 0
+            offers[(server_ip, smac)] = DhcpOffer(server_ip, smac, str(rcv[BOOTP].yiaddr), router, dns, lease)
+        return list(offers.values())
 
     def send_arp_reply(self, interface: str, hwsrc: str, psrc: str, hwdst: str, pdst: str) -> None:
         from scapy.all import ARP, Ether, sendp
@@ -225,6 +270,9 @@ class GuardedTransport:
     def resolve_mac(self, ip, interface):
         self._scope.check_ip(ip)
         return self._inner.resolve_mac(ip, interface)
+
+    def dhcp_discover(self, interface, timeout):
+        return self._inner.dhcp_discover(interface, timeout)
 
     def sniff(self, interface, bpf, callback, stop):
         self._inner.sniff(interface, bpf, callback, stop)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import secrets
 import threading
 import time
 from collections import Counter
@@ -24,8 +25,14 @@ from netscan.net import ScapyTransport, Transport
 from netscan.oui import OuiDb, update_oui
 from netscan.runtime import Runtime, build_runtime, reverse_dns, sweep, write_initial_config
 from netscan.safety import NOTICE, SafetyError
-from netscan.store import Block, Device, JobRow, Schedule, Store
+from netscan.store import Block, Device, DeviceMeta, JobRow, Schedule, Store
 from netscan.traffic import TrafficCollector, run_capture, service_name
+from netscan.web.errors import ApiError
+from netscan.portscan import port_info
+from netscan.web.features import FeatureMixin, display_name, meta_dict, presence_segments
+from netscan.update import Updater
+from netscan.web.rules import RuleEngine
+from netscan.web.selfupdate import UpdateMixin
 from netscan.web.schedule import (
     Scheduler, initial_next_run, normalise_sweep_params, timing_changed, validate_schedule,
 )
@@ -45,13 +52,6 @@ SERVICES = {
 }
 
 
-class ApiError(Exception):
-    def __init__(self, status: int, message: str):
-        super().__init__(message)
-        self.status = status
-        self.message = message
-
-
 class _Service:
     def __init__(self, name: str):
         self.name = name
@@ -66,14 +66,16 @@ class _Service:
         return bool(self.thread and self.thread.is_alive())
 
 
-def device_dict(d: Device, blocked: dict[str, Block], totals: dict[str, tuple[int, int]]) -> dict:
+def device_dict(d: Device, blocked: dict[str, Block], totals: dict[str, tuple[int, int]], metas: dict[str, DeviceMeta] | None = None) -> dict:
     b, p = totals.get(d.mac, (0, 0))
     blk = blocked.get(d.mac)
+    meta = (metas or {}).get(d.mac)
     return {
         "mac": d.mac, "ip": d.ip, "vendor": d.vendor, "hostname": d.hostname,
         "first_seen": d.first_seen, "last_seen": d.last_seen, "online": d.online,
         "blocked": blk is not None, "block": block_dict(blk) if blk else None,
         "bytes": b, "packets": p,
+        **meta_dict(meta), "name": display_name(d, meta),
     }
 
 
@@ -111,10 +113,20 @@ def describe_summary(kind: str, summary: dict) -> str:
         return f"{summary.get('packets', 0)} packets, {summary.get('bytes', 0)} bytes"
     if kind == "update_oui":
         return f"{summary.get('prefixes', 0)} vendor prefixes"
+    if kind == "update":
+        return f"updated {summary.get('from')} to {summary.get('to')}" + (", restarting" if summary.get("restarting") else ", restart netScan to use it")
+    if kind == "dhcp":
+        n, bad = summary.get("offers", 0), summary.get("problems", 0)
+        return f"{n} DHCP server{'s' if n != 1 else ''} answered" + (f", {bad} problem{'s' if bad != 1 else ''} found" if bad else ", looks normal")
+    if kind == "ports":
+        text = f"{summary.get('devices', 0)} devices checked, {summary.get('open', 0)} open ports"
+        return text + (f", {summary['findings']} new finding(s)" if summary.get("findings") else "")
     return ""
 
 
-class Controller:
+class Controller(FeatureMixin, UpdateMixin):
+    _device_dict = staticmethod(device_dict)
+
     def __init__(
         self,
         cfg: Config,
@@ -124,6 +136,9 @@ class Controller:
         resolver: Callable[[str], str] = reverse_dns,
         clock: Callable[[], float] = time.time,
         scheduler_tick: float = 1.0,
+        rules_tick: float = 5.0,
+        updater: Updater | None = None,
+        update_tick: float = 300.0,
     ):
         self.cfg = cfg
         self.raw = transport or ScapyTransport()
@@ -143,6 +158,14 @@ class Controller:
         self._bootstrap: threading.Thread | None = None
         self._closed = threading.Event()
         self.scheduler = Scheduler(self.store, self._submit_scheduled, clock, scheduler_tick)
+        self.rule_engine = RuleEngine(self)
+        self._rules_tick = rules_tick
+        self._rules_thread: threading.Thread | None = None
+        self.updater = updater or Updater()
+        self._update_tick = update_tick
+        self._update_thread: threading.Thread | None = None
+        self.on_restart = None
+        self.boot_id = secrets.token_hex(4)
 
     # lifecycle
     def start(self) -> None:
@@ -153,10 +176,32 @@ class Controller:
             self._bootstrap = threading.Thread(target=self._bootstrap_daemon, name="netscan-bootstrap", daemon=True)
             self._bootstrap.start()
         self.scheduler.start()
+        self._rules_thread = threading.Thread(target=self._rules_loop, name="netscan-rules", daemon=True)
+        self._rules_thread.start()
+        self._update_thread = threading.Thread(target=self._update_loop, name="netscan-update", daemon=True)
+        self._update_thread.start()
+
+    def _update_loop(self) -> None:
+        """With automatic updates on, a headless machine (the Pi) follows GitHub without anyone opening the page."""
+        while not self._closed.wait(self._update_tick):
+            try:
+                if self.update_auto():
+                    self.update_status(force=True)
+            except Exception:  # noqa: BLE001 a failed check must never stop the loop
+                log.exception("automatic update check failed")
+
+    def _rules_loop(self) -> None:
+        while not self._closed.wait(self._rules_tick):
+            try:
+                self.rule_engine.tick(self.clock())
+            except Exception:  # noqa: BLE001 the timetable thread must outlive any single failure
+                log.exception("rule engine tick failed")
 
     def close(self) -> None:
         self._closed.set()
         self.scheduler.stop()
+        if self._rules_thread:
+            self._rules_thread.join(timeout=10)
         for name in self._services:
             self._stop_service(name)
         for ev in self._cancel.values():
@@ -257,10 +302,12 @@ class Controller:
             pass
         devices = self.store.list_devices()
         blocks = self.store.list_blocks()
+        metas = self.store.list_meta()
         can_raw = rt.transport.can_raw() if rt else bool(getattr(self.raw, "is_root", lambda: True)())
         now = self.clock()
         return {
             "version": __version__,
+            "boot_id": self.boot_id,
             "now": now,
             "tz": time.strftime("%Z", time.localtime(now)),
             "utc_offset": -(time.altzone if time.localtime(now).tm_isdst > 0 else time.timezone),
@@ -277,6 +324,8 @@ class Controller:
             "counts": {
                 "devices": len(devices), "online": sum(1 for d in devices if d.online),
                 "offline": sum(1 for d in devices if not d.online), "blocked": len(blocks),
+                "unreviewed": sum(1 for d in devices if metas.get(d.mac, DeviceMeta(d.mac)).trust == "unknown"),
+                "rules_active": sum(1 for r in self.store.list_rules() if r.active),
             },
             "services": self.services_status(),
             "active_jobs": [job_dict(j) for j in self.store.active_jobs()],
@@ -287,7 +336,8 @@ class Controller:
     def devices(self) -> list[dict]:
         blocked = {b.mac: b for b in self.store.list_blocks()}
         totals = self.store.traffic_totals()
-        return [device_dict(d, blocked, totals) for d in self.store.list_devices()]
+        metas = self.store.list_meta()
+        return [device_dict(d, blocked, totals, metas) for d in self.store.list_devices()]
 
     def device_detail(self, ident: str) -> dict:
         dev = self.store.find_device(normalise_mac(ident) or ident)
@@ -304,7 +354,18 @@ class Controller:
             for r in self.store.traffic_for(dev.mac)[:200]
         ]
         events = [dict(r) for r in self.store.recent_events(500) if r["mac"] == dev.mac][:30]
-        return {"device": device_dict(dev, blocked, totals), "traffic": traffic, "events": events}
+        scan = self.store.get_port_scan(dev.mac)
+        ports = {"ts": scan["ts"], "open": [port_info(p) for p in scan["open"]]} if scan else None
+        now = self.clock()
+        segs = presence_segments(
+            [(r["ts"], r["kind"]) for r in self.store.events_for_mac(dev.mac)], dev.first_seen, now - 7 * 86400, now, self.cfg.daemon.offline_after,
+        )
+        rule = self.rule_holding(dev.mac)
+        return {
+            "device": device_dict(dev, blocked, totals, self.store.list_meta()), "traffic": traffic, "events": events,
+            "ports": ports, "presence": {"since": now - 7 * 86400, "until": now, "segments": segs},
+            "held_by_rule": {"id": rule.id, "name": rule.name} if rule else None,
+        }
 
     def blocks(self) -> list[dict]:
         return [block_dict(b) for b in self.store.list_blocks()]
@@ -315,15 +376,18 @@ class Controller:
     def config_view(self) -> dict:
         cfg = self.cfg
 
-        def mask(url: str) -> str:
-            return "configured" if url else ""
+        from netscan.alerts import effective_alert_config
+
+        eff = effective_alert_config(cfg.alerts, self.store)
 
         return {
             "path": str(cfg.config_path), "home": str(cfg.home), "db_path": str(cfg.db_path),
             "allowed_subnets": [str(n) for n in cfg.allowed_subnets], "interface": cfg.interface or "auto",
             "gateway": cfg.gateway or "auto", "gateway_mac": cfg.gateway_mac, "extra_protected": cfg.extra_protected,
             "block_method": cfg.block_method,
-            "alerts": {"webhook": mask(cfg.alerts.webhook_url), "ntfy": mask(cfg.alerts.ntfy_url), "notify_on": list(cfg.alerts.notify_on)},
+            "alerts": {
+                "webhook": "configured" if eff.webhook_url else "", "ntfy": "configured" if eff.ntfy_url else "", "notify_on": list(eff.notify_on),
+            },
             "daemon": {
                 "sweep_interval": cfg.daemon.sweep_interval, "offline_after": cfg.daemon.offline_after,
                 "arp_watch": cfg.daemon.arp_watch, "capture_traffic": cfg.daemon.capture_traffic,
@@ -429,6 +493,12 @@ class Controller:
                 summary = self._do_traffic(job.params, cancel)
             elif job.kind == "update_oui":
                 summary = self._do_update_oui()
+            elif job.kind == "update":
+                summary = self._do_update()
+            elif job.kind == "dhcp":
+                summary = self._do_dhcp()
+            elif job.kind == "ports":
+                summary = self._do_ports(job.params, cancel)
             else:
                 raise ApiError(400, f"unknown job kind {job.kind!r}")
             state = "cancelled" if cancel.is_set() else "done"
@@ -539,12 +609,20 @@ class Controller:
         if not isinstance(target, str) or not target.strip():
             raise ApiError(400, "target (ip or mac) is required")
         rt = self._runtime()
-        enforcer = ArpEnforcer(rt.store, rt.scope, rt.transport, rt.local.interface, rt.scope.gateway_ip)
-        ev = self._manager(rt).unblock(target.strip(), restore=enforcer.restore_block if self.cfg.block_method == "arp" else None)
+        mac = normalise_mac(target.strip())
+        blk = next((b for b in self.store.list_blocks() if b.mac == mac or b.ip == target.strip()), None)
+        rule = self.rule_holding(blk.mac) if blk else None
+        if rule:
+            raise ApiError(409, f"{blk.ip} is blocked by the rule \"{rule.name}\"; pause or delete that rule to release it")
+        ev = self._unblock_mac(rt, target.strip())
         if ev is None:
             raise ApiError(404, f"{target} is not blocked")
         rt.alerter.dispatch([ev])
         return {"mac": ev.mac, "ip": ev.ip}
+
+    def _unblock_mac(self, rt: Runtime, ident: str):
+        enforcer = ArpEnforcer(rt.store, rt.scope, rt.transport, rt.local.interface, rt.scope.gateway_ip)
+        return self._manager(rt).unblock(ident, restore=enforcer.restore_block if self.cfg.block_method == "arp" else None)
 
     # services
     def services_status(self) -> dict:

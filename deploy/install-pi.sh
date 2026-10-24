@@ -27,6 +27,7 @@ mkdir -p "$HOME_DIR"
 chown netscan: "$HOME_DIR"
 
 echo "==> Fetching netScan into $DEST"
+git config --global --add safe.directory "$DEST"   # root re-runs this script on a checkout the service user owns
 if [ -d "$DEST/.git" ]; then
   git -C "$DEST" fetch origin "$BRANCH"
   git -C "$DEST" checkout "$BRANCH"
@@ -39,6 +40,8 @@ echo "==> Building virtualenv"
 python3 -m venv "$DEST/.venv"
 "$DEST/.venv/bin/pip" install --upgrade pip
 "$DEST/.venv/bin/pip" install "$DEST"
+# the service user owns the checkout and venv, so the dashboard can update itself (System > Updates)
+chown -R netscan: "$DEST"
 
 run_as_netscan() { sudo -u netscan env NETSCAN_HOME="$HOME_DIR" "$@"; }
 
@@ -47,6 +50,11 @@ if [ ! -f "$HOME_DIR/config.toml" ]; then
   run_as_netscan "$DEST/.venv/bin/netscan" --accept-terms init
 else
   echo "==> Keeping existing $HOME_DIR/config.toml"
+fi
+
+if [ "${NETSCAN_AUTO_UPDATE:-1}" = "1" ]; then
+  echo "==> Turning on automatic updates (the Pi follows $BRANCH on GitHub; set NETSCAN_AUTO_UPDATE=0 to skip)"
+  run_as_netscan "$DEST/.venv/bin/netscan" --accept-terms update --auto on
 fi
 
 echo "==> Installing systemd unit"

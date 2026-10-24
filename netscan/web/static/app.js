@@ -1,11 +1,14 @@
 // netScan dashboard. Vanilla ES modules, no build step.
+import { buildHelp } from "/help.js";
+import { createExtra } from "/extra.js";
+import { createUpdates } from "/updates.js";
 // Every piece of data from the network (hostnames, vendors) is inserted with textContent via h(),
 // never innerHTML, so a device cannot inject markup into this page.
 
 const TOKEN_KEY = "netscan.token";
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
-  status: null, devices: [], blocks: [], jobs: [], schedules: [], events: [], config: null,
+  status: null, devices: [], blocks: [], jobs: [], schedules: [], events: [], config: null, rules: [], alerts: null, update: null, bootId: "", selected: new Set(),
   skew: 0, tab: "devices", online: true, lastJobStates: {}, filter: "all", search: "", sort: { key: "ip", dir: 1 },
 };
 
@@ -63,7 +66,7 @@ function fmtBytes(n) {
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return i === 0 ? `${v} B` : `${v.toFixed(1)} ${units[i]}`;
 }
-const label = (d) => d.hostname || d.vendor || "Unknown device";
+const label = (d) => d.name || d.hostname || d.vendor || "Unknown device";
 const isProtected = (d) => !!state.status?.network && (d.ip === state.status.network.gateway || d.ip === state.status.network.ip);
 
 // ---------- api ----------
@@ -102,7 +105,14 @@ function modal({ title, body, actions = [], wide = false }) {
   if (first) first.focus();
   return box;
 }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeModal();
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName || "");
+  if (e.key === "?" && !typing && shell) { e.preventDefault(); openHelp(); }
+});
+function openHelp() {
+  modal({ title: "How to use netScan", body: buildHelp(h), actions: [{ label: "Close", onClick: closeModal }], wide: true });
+}
 
 function field(labelText, control, hint) {
   return h("div", { class: "field" }, h("label", {}, labelText), control, hint ? h("span", { class: "hint" }, hint) : null);
@@ -134,7 +144,7 @@ function renderLogin(message) {
 
 // ---------- shell ----------
 const TABS = [
-  ["devices", "Devices"], ["traffic", "Traffic"], ["schedule", "Schedule"], ["activity", "Activity"], ["blocks", "Blocks"], ["system", "System"],
+  ["devices", "Devices"], ["presence", "Presence"], ["security", "Security"], ["traffic", "Traffic"], ["schedule", "Schedule"], ["activity", "Activity"], ["blocks", "Access"], ["system", "System"],
 ];
 let shell = null;
 const views = {};
@@ -144,9 +154,11 @@ function buildShell() {
   const chips = h("div", { class: "chips" });
   const tabs = h("nav", { class: "tabs", role: "tablist" });
   const main = h("main", { id: "main" });
+  const updateBox = h("div", { id: "update-banner" });
   app.append(h("header", { class: "topbar" }, h("span", { class: "brand" }, "netScan"), chips, h("span", { class: "grow" }),
-    h("button", { class: "btn small ghost", onclick: () => { state.token = ""; localStorage.removeItem(TOKEN_KEY); renderLogin(); } }, "Sign out")), tabs, main);
-  shell = { chips, tabs, main, tabButtons: {} };
+    h("button", { class: "btn small", "aria-haspopup": "dialog", title: "How to use netScan (press ? anywhere)", onclick: openHelp }, "Help"),
+    h("button", { class: "btn small ghost", onclick: () => { state.token = ""; localStorage.removeItem(TOKEN_KEY); renderLogin(); } }, "Sign out")), tabs, updateBox, main);
+  shell = { chips, tabs, main, updateBox, tabButtons: {} };
   for (const [id, name] of TABS) {
     const count = h("span", { class: "count hidden" });
     const b = h("button", { class: "tab", role: "tab", "aria-selected": "false", onclick: () => selectTab(id) }, name, count);
@@ -164,6 +176,7 @@ function selectTab(id) {
 }
 function updateShell() {
   const s = state.status;
+  clear(shell.updateBox).append(updates.banner());
   const chips = clear(shell.chips);
   if (!state.online) chips.append(h("span", { class: "chip bad" }, "Cannot reach netScan"));
   if (s) {
@@ -243,8 +256,13 @@ function deviceActions(d, withDetails = true) {
   return h("div", { class: "actions" },
     withDetails ? h("button", { class: "btn small", onclick: (e) => { e.stopPropagation(); openDevice(d.mac); } }, "Details") : null,
     d.blocked
-      ? h("button", { class: "btn small", onclick: (e) => { e.stopPropagation(); if (!withDetails) closeModal(); unblock(d); } }, "Unblock")
-      : h("button", { class: "btn small danger", disabled: isProtected(d), title: isProtected(d) ? "The gateway and this machine are never blocked" : "", onclick: (e) => { e.stopPropagation(); blockModal(d); } }, "Block"));
+      ? (extra.isRuleBlock(d)
+        ? h("button", { class: "btn small", disabled: true, title: "Held by a timetable or timer. Pause or delete it under Access to release." }, "Held by rule")
+        : h("button", { class: "btn small", onclick: (e) => { e.stopPropagation(); if (!withDetails) closeModal(); unblock(d); } }, "Unblock"))
+      : [
+        h("button", { class: "btn small danger", disabled: isProtected(d), title: isProtected(d) ? "The gateway and this machine are never blocked" : "", onclick: (e) => { e.stopPropagation(); blockModal(d); } }, "Block"),
+        withDetails ? null : h("button", { class: "btn small danger", disabled: isProtected(d), onclick: (e) => { e.stopPropagation(); closeModal(); extra.quickBlockModal([d]); } }, "Block for..."),
+      ]);
 }
 
 async function openDevice(mac) {
@@ -252,9 +270,12 @@ async function openDevice(mac) {
     let data;
     try { data = await api("GET", `/api/devices/${encodeURIComponent(mac)}`); } catch (e) { toast(e.message, true); return; }
     const d = data.device;
+    const ex = extra.deviceExtras(data);
     const body = h("div", {},
+      ex.top,
       h("dl", { class: "kv" },
         h("dt", {}, "Status"), h("dd", {}, statusCell(d)),
+        d.owner ? [h("dt", {}, "Owner"), h("dd", {}, d.owner)] : null,
         h("dt", {}, "IP"), h("dd", { class: "mono" }, d.ip),
         h("dt", {}, "MAC"), h("dd", { class: "mono" }, d.mac),
         h("dt", {}, "Vendor"), h("dd", {}, d.vendor || "-"),
@@ -265,7 +286,8 @@ async function openDevice(mac) {
       h("h3", { class: "muted" }, "Traffic metadata (no payloads)"),
       data.traffic.length ? trafficTable(data.traffic) : h("p", { class: "muted" }, "No traffic recorded for this device. ", state.status.capture_limits),
       h("h3", { class: "muted" }, "Recent events"),
-      data.events.length ? h("ul", { class: "list" }, data.events.map((e) => h("li", {}, h("span", { class: "when" }, ago(e.ts)), h("span", { class: "body" }, h("span", { class: `badge ${e.kind}` }, e.kind), " ", e.message)))) : h("p", { class: "muted" }, "No events."));
+      data.events.length ? h("ul", { class: "list" }, data.events.map((e) => h("li", {}, h("span", { class: "when" }, ago(e.ts)), h("span", { class: "body" }, h("span", { class: `badge ${e.kind}` }, e.kind), " ", e.message)))) : h("p", { class: "muted" }, "No events."),
+      ex.bottom);
     const box = modal({ title: label(d), body, actions: [{ label: "Close", onClick: closeModal }], wide: true });
     box.querySelector("footer").prepend(deviceActions(d, false));
   }
@@ -279,10 +301,13 @@ function trafficTable(rows) {
       h("td", {}, r.peer_port || "-"), h("td", { class: "nowrap" }, fmtBytes(r.bytes)), h("td", {}, r.packets), h("td", { class: "nowrap" }, ago(r.last_seen)))))));
 }
 
+const updates = createUpdates({ h, clear, api, act, toast, state, ago, fmtTime, rerender: () => { if (shell) { updateShell(); views[state.tab].update(); } } });
+const extra = createExtra({ h, clear, api, act, toast, modal, closeModal, field, state, ago, fmtTime, fmtDur, until, refresh: () => refresh(), openDevice: (m) => openDevice(m), label, isProtected });
+
 // ---------- views ----------
 views.devices = (() => {
-  let setup, summary, tbody, scanBtn, headRow;
-  const FILTERS = [["all", "All"], ["online", "Online"], ["offline", "Offline"], ["blocked", "Blocked"]];
+  let setup, banner, bulk, summary, tbody, scanBtn, headRow, selAll, view, seg, shownRows = [];
+  const FILTERS = [["all", "All"], ["online", "Online"], ["offline", "Offline"], ["blocked", "Blocked"], ["review", "Unreviewed"]];
   const sorters = {
     ip: (a, b) => a.ip.split(".").reduce((x, y) => x * 256 + Number(y), 0) - b.ip.split(".").reduce((x, y) => x * 256 + Number(y), 0),
     name: (a, b) => label(a).localeCompare(label(b)),
@@ -291,17 +316,16 @@ views.devices = (() => {
   };
   return {
     mount(root) {
-      setup = h("div"); summary = h("span", { class: "muted" });
+      view = this; setup = h("div"); banner = h("div"); bulk = h("div"); summary = h("span", { class: "muted" });
       scanBtn = h("button", { class: "btn primary", onclick: () => act(() => api("POST", "/api/scan", { hostnames: true, timeout: 3, offline_after: 0 }), "Scan queued") }, "Scan now");
-      const search = h("input", { class: "input", type: "search", placeholder: "Search ip, mac, vendor, name", "aria-label": "Search devices", value: state.search, oninput: (e) => { state.search = e.target.value; this.update(); } });
-      const seg = h("div", { class: "seg" }, FILTERS.map(([id, name]) => h("button", { "aria-pressed": String(state.filter === id), onclick: (e) => {
-        state.filter = id; [...seg.children].forEach((b) => b.setAttribute("aria-pressed", String(b === e.currentTarget))); this.update();
-      } }, name)));
-      headRow = h("tr", {}, [["Status", null], ["Device", "name"], ["IP", "ip"], ["MAC", null], ["Last seen", "seen"], ["Traffic", "traffic"], ["", null]].map(([n, key]) =>
+      const search = h("input", { class: "input", type: "search", placeholder: "Search name, owner, ip, mac, vendor", "aria-label": "Search devices", value: state.search, oninput: (e) => { state.search = e.target.value; this.update(); } });
+      seg = h("div", { class: "seg" }, FILTERS.map(([id, name]) => h("button", { "data-filter": id, "aria-pressed": String(state.filter === id), onclick: () => { state.filter = id; this.update(); } }, name)));
+      selAll = h("input", { type: "checkbox", "aria-label": "Select all shown devices", onchange: (e) => { for (const d of shownRows) { if (e.target.checked) state.selected.add(d.mac); else state.selected.delete(d.mac); } view.update(); } });
+      headRow = h("tr", {}, [[selAll, null], ["Status", null], ["Device", "name"], ["IP", "ip"], ["MAC", null], ["Last seen", "seen"], ["Traffic", "traffic"], ["", null]].map(([n, key]) =>
         h("th", { class: key ? "sortable" : "", onclick: key ? () => { state.sort = { key, dir: state.sort.key === key ? -state.sort.dir : 1 }; this.update(); } : null }, n)));
       tbody = h("tbody");
-      root.append(setup, h("div", { class: "toolbar" }, scanBtn, h("button", { class: "btn", onclick: scanModal }, "Scan options"), search, seg, h("span", { class: "grow" }), summary),
-        h("div", { class: "card tablewrap" }, h("table", {}, h("thead", {}, headRow), tbody)));
+      root.append(setup, banner, h("div", { class: "toolbar" }, scanBtn, h("button", { class: "btn", onclick: scanModal }, "Scan options"), search, seg, h("span", { class: "grow" }), summary),
+        bulk, h("div", { class: "card tablewrap" }, h("table", {}, h("thead", {}, headRow), tbody)));
     },
     update() {
       const s = state.status; if (!s) return;
@@ -314,21 +338,34 @@ views.devices = (() => {
         if (state.filter === "online" && (!d.online || d.blocked)) return false;
         if (state.filter === "offline" && (d.online || d.blocked)) return false;
         if (state.filter === "blocked" && !d.blocked) return false;
-        return !q || [d.ip, d.mac, d.vendor, d.hostname].some((v) => (v || "").toLowerCase().includes(q));
+        if (state.filter === "review" && d.trust !== "unknown") return false;
+        return !q || [d.ip, d.mac, d.vendor, d.hostname, d.name, d.owner, d.category].some((v) => (v || "").toLowerCase().includes(q));
       });
       rows = rows.slice().sort((a, b) => sorters[state.sort.key](a, b) * state.sort.dir);
+      shownRows = rows;
       summary.textContent = `${s.counts.online} online, ${s.counts.offline} offline, ${s.counts.blocked} blocked`;
+      const known = new Set(state.devices.map((d) => d.mac));
+      for (const m of [...state.selected]) if (!known.has(m)) state.selected.delete(m);
+      [...seg.children].forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.filter === state.filter)));
+      clear(banner); const rb = extra.reviewBanner(() => { state.filter = "review"; view.update(); }); if (rb && state.filter !== "review") banner.append(rb);
+      clear(bulk); if (state.selected.size) bulk.append(extra.bulkBar(state.selected, () => { state.selected.clear(); view.update(); }));
+      selAll.checked = rows.length > 0 && rows.every((d) => state.selected.has(d.mac));
       clear(tbody);
       if (!rows.length) {
-        tbody.append(h("tr", {}, h("td", { colspan: 7 }, h("div", { class: "empty" }, state.devices.length
+        tbody.append(h("tr", {}, h("td", { colspan: 8 }, h("div", { class: "empty" }, state.devices.length
           ? h("h3", {}, "No devices match")
           : [h("h3", {}, "No devices yet"), h("p", {}, "Run a scan to discover what is on your network."), h("button", { class: "btn primary", disabled: !s.ready, onclick: () => act(() => api("POST", "/api/scan", { hostnames: true, timeout: 3, offline_after: 0 }), "Scan queued") }, "Scan now")]))));
         return;
       }
       for (const d of rows) {
+        const pick = h("input", { type: "checkbox", checked: state.selected.has(d.mac), "aria-label": `Select ${label(d)}`, disabled: isProtected(d),
+          onchange: (e) => { if (e.target.checked) state.selected.add(d.mac); else state.selected.delete(d.mac); view.update(); } });
+        pick.addEventListener("click", (e) => e.stopPropagation());
+        const sub = [d.owner, d.name && d.hostname && d.name !== d.hostname ? d.hostname : (d.name ? null : d.vendor), d.category].filter(Boolean).join(" · ");
         tbody.append(h("tr", { class: "clickable", onclick: () => openDevice(d.mac) },
+          h("td", { class: "selcell", onclick: (e) => e.stopPropagation() }, pick),
           h("td", {}, statusCell(d)),
-          h("td", {}, h("div", {}, label(d), isProtected(d) ? [" ", h("span", { class: "badge" }, d.ip === s.network?.gateway ? "gateway" : "this machine")] : null), d.hostname && d.vendor ? h("div", { class: "muted small" }, d.vendor) : null),
+          h("td", {}, h("div", {}, label(d), isProtected(d) ? [" ", h("span", { class: "badge" }, d.ip === s.network?.gateway ? "gateway" : "this machine")] : null, " ", extra.trustBadges(d), d.blocked && extra.isRuleBlock(d) ? [" ", h("span", { class: "badge blocked", title: d.block.reason }, "timetable")] : null), sub ? h("div", { class: "muted small" }, sub) : null),
           h("td", { class: "mono nowrap" }, d.ip), h("td", { class: "mono nowrap hide-sm" }, d.mac),
           h("td", { class: "nowrap", title: fmtTime(d.last_seen) }, ago(d.last_seen)),
           h("td", { class: "nowrap hide-sm" }, d.packets ? `${fmtBytes(d.bytes)}` : "-"),
@@ -337,6 +374,9 @@ views.devices = (() => {
     },
   };
 })();
+
+views.presence = extra.presenceView;
+views.security = extra.securityView;
 
 views.traffic = (() => {
   let info, form, list;
@@ -470,6 +510,7 @@ function describeSource(src) {
   if (src.startsWith("schedule:")) { const sc = state.schedules.find((x) => `schedule:${x.id}` === src); return sc ? sc.name : "schedule"; }
   return src;
 }
+const JOB_NAMES = { sweep: "Scan", traffic: "Capture", update_oui: "Vendor update", update: "Update", dhcp: "DHCP check", ports: "Port check" };
 function jobSummary(j) {
   const sm = j.summary || {};
   if (j.error) return j.error;
@@ -479,6 +520,9 @@ function jobSummary(j) {
     return bits.join(", ");
   }
   if (j.kind === "traffic" && sm.packets !== undefined) return `${sm.packets} packets, ${fmtBytes(sm.bytes)} across ${sm.devices} devices`;
+  if (j.kind === "dhcp" && sm.offers !== undefined) return `${sm.offers} DHCP server${sm.offers === 1 ? "" : "s"} answered${sm.problems ? `, ${sm.problems} problem${sm.problems === 1 ? "" : "s"} found` : ", looks normal"}`;
+  if (j.kind === "ports" && sm.devices !== undefined) return `${sm.devices} devices checked, ${sm.open} open ports${sm.findings ? `, ${sm.findings} new finding(s)` : ""}`;
+  if (j.kind === "update" && sm.to) return `${sm.from} to ${sm.to}${sm.restarting ? ", restarting" : ", restart netScan to use it"}`;
   if (j.kind === "update_oui" && sm.prefixes) return `${sm.prefixes} vendor prefixes`;
   return "";
 }
@@ -505,21 +549,22 @@ views.activity = (() => {
 })();
 
 views.blocks = (() => {
-  let info, form, table, pick, manual;
+  let info, form, table, pick, manual, rules;
   return {
     mount(root) {
-      info = h("div"); table = h("div", { class: "card" });
+      info = h("div"); table = h("div", { class: "card" }); rules = extra.rulesCard();
       pick = h("select", { class: "input", "aria-label": "Device to block" });
       manual = h("input", { class: "input", placeholder: "or type an ip / mac", "aria-label": "IP or MAC to block" });
-      form = h("div", { class: "card" }, h("h2", {}, "Block a device"),
+      form = h("div", { class: "card" }, h("h2", {}, "Block a device now"),
         h("div", { class: "row" }, pick, manual, h("button", { class: "btn danger", onclick: () => {
           const target = manual.value.trim() || pick.value; if (!target) return;
           const dev = state.devices.find((d) => d.mac === target || d.ip === target) || { ip: target, mac: target, hostname: "", vendor: "" };
           blockModal(dev); } }, "Block...")));
-      root.append(info, form, h("div", {}, table));
+      root.append(info, form, rules.el, h("div", {}, table));
     },
     update() {
       const s = state.status; if (!s) return;
+      rules.update();
       clear(info);
       if (s.block_method === "arp") {
         info.append(h("div", { class: `callout${state.blocks.length && !s.services.enforce.running ? " warn" : ""}` },
@@ -534,17 +579,21 @@ views.blocks = (() => {
       table.append(h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["IP", "MAC", "Method", "Since", "Reason", ""].map((c) => h("th", {}, c)))),
         h("tbody", {}, state.blocks.map((b) => { const d = state.devices.find((x) => x.mac === b.mac) || { ip: b.ip, mac: b.mac };
           return h("tr", {}, h("td", { class: "mono" }, b.ip), h("td", { class: "mono" }, b.mac), h("td", {}, b.method), h("td", {}, ago(b.blocked_at)), h("td", {}, b.reason || "-"),
-            h("td", {}, h("div", { class: "actions" }, h("button", { class: "btn small", onclick: () => unblock(d) }, "Unblock")))); })))));
+            h("td", {}, h("div", { class: "actions" }, (b.reason || "").startsWith("rule: ")
+              ? h("button", { class: "btn small", disabled: true, title: "Held by a timetable or timer. Pause or delete it above to release." }, "Held by rule")
+              : h("button", { class: "btn small", onclick: () => unblock(d) }, "Unblock")))); })))));
     },
   };
 })();
 
 views.system = (() => {
-  let setup, services, tools, cfg, about;
+  let setup, services, tools, cfg, about, alertsBox, updatesBox;
   return {
     mount(root) {
-      setup = h("div"); services = h("div", { class: "card" }); tools = h("div", { class: "card" }); cfg = h("div", { class: "card" }); about = h("div", { class: "card" });
-      root.append(setup, h("div", { class: "grid2" }, services, tools), h("div", { class: "grid2" }, cfg, about));
+      setup = h("div"); services = h("div", { class: "card" }); tools = h("div", { class: "card" }); cfg = h("div", { class: "card" }); about = h("div", { class: "card" }); alertsBox = h("div"); updatesBox = h("div");
+      root.append(setup, h("div", { class: "grid2" }, services, tools), h("div", { class: "grid2" }, alertsBox, cfg), h("div", { class: "grid2" }, updatesBox, about));
+      extra.loadAlerts().then(() => this.update());
+      updates.load(true).then(() => { if (state.tab === "system") { updateShell(); this.update(); } });
       api("GET", "/api/config").then((c) => { state.config = c; this.update(); }).catch(() => {});
     },
     update() {
@@ -565,15 +614,16 @@ views.system = (() => {
           h("button", { class: "btn", onclick: () => act(() => api("POST", "/api/update-oui"), "Vendor update queued") }, "Update")),
         h("div", { class: "service" }, h("div", {}, h("strong", {}, "Re-detect network"), h("div", { class: "muted small" }, "Use after moving to another network or changing the router. Stop services first.")),
           h("button", { class: "btn", onclick: () => act(() => api("POST", "/api/refresh"), "Network re-detected") }, "Re-detect")));
+      clear(alertsBox).append(extra.alertsCard());
+      clear(updatesBox).append(updates.card());
       const c = state.config;
-      clear(cfg).append(h("h2", {}, "Configuration (read-only)"));
+      clear(cfg).append(h("h2", {}, "Configuration (edit in config.toml)"));
       if (c) cfg.append(h("dl", { class: "kv" },
         h("dt", {}, "Config file"), h("dd", { class: "mono" }, c.path),
         h("dt", {}, "Allow-list"), h("dd", {}, c.allowed_subnets.join(", ") || "none"),
         h("dt", {}, "Gateway pin"), h("dd", { class: "mono" }, c.gateway_mac || "not pinned"),
         h("dt", {}, "Block method"), h("dd", {}, c.block_method),
         h("dt", {}, "Also protected"), h("dd", {}, c.extra_protected.join(", ") || "gateway and this machine only"),
-        h("dt", {}, "Alerts"), h("dd", {}, [c.alerts.webhook ? "webhook" : "", c.alerts.ntfy ? "ntfy" : ""].filter(Boolean).join(", ") || "terminal/log only", ` (on: ${c.alerts.notify_on.join(", ")})`),
         h("dt", {}, "Daemon"), h("dd", {}, `sweep ${fmtDur(c.daemon.sweep_interval)}, offline after ${fmtDur(c.daemon.offline_after)}, ARP watch ${c.daemon.arp_watch ? "on" : "off"}, capture ${c.daemon.capture_traffic ? "on" : "off"}`)));
       clear(about).append(h("h2", {}, "About"), h("dl", { class: "kv" },
         h("dt", {}, "Version"), h("dd", {}, s.version), h("dt", {}, "Mode"), h("dd", {}, s.daemon ? "daemon (sweeps, watch and enforcement run in the background)" : "local"),
@@ -589,14 +639,17 @@ function stopPolling() { if (timer) clearTimeout(timer); timer = null; }
 
 async function refresh() {
   try {
-    const [status, devices, blocks, jobs, schedules, events] = await Promise.all([
-      api("GET", "/api/status"), api("GET", "/api/devices"), api("GET", "/api/blocks"), api("GET", "/api/jobs?limit=25"), api("GET", "/api/schedules"), api("GET", "/api/events?limit=40"),
+    const [status, devices, blocks, jobs, schedules, events, rules] = await Promise.all([
+      api("GET", "/api/status"), api("GET", "/api/devices"), api("GET", "/api/blocks"), api("GET", "/api/jobs?limit=25"), api("GET", "/api/schedules"), api("GET", "/api/events?limit=40"), api("GET", "/api/rules"),
     ]);
-    Object.assign(state, { status, devices, blocks, jobs, schedules, events, online: true, skew: status.now - Date.now() / 1000 });
+    if (state.bootId && status.boot_id && status.boot_id !== state.bootId) { location.reload(); return; }
+    state.bootId = status.boot_id || "";
+    if (state.update?.applying || status.active_jobs.some((j) => j.kind === "update")) await updates.load();
+    Object.assign(state, { status, devices, blocks, jobs, schedules, events, rules, online: true, skew: status.now - Date.now() / 1000 });
     for (const j of jobs) {
       const prev = state.lastJobStates[j.id];
       if (prev && (prev === "queued" || prev === "running") && j.state !== prev && j.source === "manual") {
-        toast(j.state === "done" ? `${j.kind === "sweep" ? "Scan" : j.kind === "traffic" ? "Capture" : "Update"} finished: ${jobSummary(j)}` : `${j.kind} ${j.state}${j.error ? `: ${j.error}` : ""}`, j.state === "error");
+        toast(j.state === "done" ? `${JOB_NAMES[j.kind] || "Job"} finished: ${jobSummary(j)}` : `${j.kind} ${j.state}${j.error ? `: ${j.error}` : ""}`, j.state === "error");
       }
       state.lastJobStates[j.id] = j.state;
     }
@@ -630,6 +683,8 @@ async function start() {
   try { await api("GET", "/api/status"); } catch (e) { if (e.message === "unauthorised") return; }
   try { state.config = await api("GET", "/api/config"); } catch { /* shown later */ }
   selectTab(state.tab);
+  updates.load().then(() => { if (shell) updateShell(); });
+  setInterval(() => { if (state.token) updates.load().then(() => { if (shell) updateShell(); }); }, 10 * 60 * 1000);
   await refresh();
   schedulePoll();
 }

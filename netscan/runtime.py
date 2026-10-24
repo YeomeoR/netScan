@@ -28,6 +28,7 @@ class Runtime:
     oui: OuiDb
     tracker: DeviceTracker
     alerter: Alerter
+    gateway_mac: str = ""
 
 
 def reverse_dns(ip: str, timeout: float = 2.0) -> str:
@@ -71,7 +72,7 @@ def build_runtime(cfg: Config, transport: Transport | None = None, resolve_hostn
     store = Store(cfg.db_path)
     oui = OuiDb.load(cfg.oui_path)
     tracker = DeviceTracker(store, oui, scope, resolve_hostname, cfg.daemon.silent_baseline)
-    return Runtime(cfg, scope, guarded, local, store, oui, tracker, Alerter(cfg.alerts))
+    return Runtime(cfg, scope, guarded, local, store, oui, tracker, Alerter(cfg.alerts, store=store), gateway_mac=gw_mac or normalise_mac(cfg.gateway_mac) or "")
 
 
 def sweep(rt: Runtime, timeout: float = 3.0, now: float | None = None, resolve_names: bool = True):
@@ -81,6 +82,7 @@ def sweep(rt: Runtime, timeout: float = 3.0, now: float | None = None, resolve_n
     if rt.local.mac:
         hosts.append(Host(rt.local.ip, rt.local.mac))
     events = rt.tracker.observe(hosts, now, allow_baseline=True, resolve_names=resolve_names)
+    events += rt.tracker.check_conflicts([(h.ip, h.mac) for h in hosts], now)
     return hosts, events
 
 

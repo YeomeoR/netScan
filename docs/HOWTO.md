@@ -517,6 +517,16 @@ notify_on = ["new_device", "ip_conflict", "arp_spoof", "rogue_dhcp", "port_opene
 
 Other event names: `device_online`, `device_offline`, `ip_changed`, `blocked`, `unblocked`. Only `http` and `https` addresses are accepted. A failing webhook or ntfy server is logged and never stops the service.
 
+### What a notification contains
+
+The headline is the device itself: the name you gave it in the dashboard, otherwise the vendor and the last two bytes of its MAC (`Samsung 77:25: new device`), otherwise `Private MAC 25:77` for a randomised address, otherwise the IP. The hostname is in the body, not the headline. The body also lists IP, MAC, vendor, owner, type, review status, how long netScan has known the device, and which machine sent the message (useful when the Mac and the Pi share one topic). "Back online" says how long the device was unseen.
+
+**Getting messages you did not tick?** Three usual causes:
+
+1. The device is set to "Always alert about this device". That overrides the tick boxes for every event kind. The message then ends with `Sent because: this device is set to 'Always alert'`. Check on the Pi: `sqlite3 /var/lib/netscan/netscan.db "select mac,alert from device_meta where alert != 'default'"`.
+2. A second netScan (for example on the Mac) uses the same ntfy topic. Each machine has its own alert settings. The `Sent by` line names the sender.
+3. The settings were not saved. See what the Pi actually uses: `sqlite3 /var/lib/netscan/netscan.db "select json_extract(value,'$.notify_on') from settings where key='alerts'"`.
+
 ### Phone notifications with ntfy
 
 1. Install the ntfy app on the iPhone.

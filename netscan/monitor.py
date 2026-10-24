@@ -29,6 +29,17 @@ ALERTABLE_KINDS = (NEW_DEVICE, DEVICE_ONLINE, DEVICE_OFFLINE, IP_CHANGED, BLOCKE
 SECURITY_DEDUPE_SECONDS = 6 * 3600
 
 
+def ago(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{round(seconds / 60)} min"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f} h".replace(".0 ", " ")
+    return f"{seconds // 86400} days"
+
+
 @dataclass
 class Event:
     kind: str
@@ -102,7 +113,8 @@ class DeviceTracker:
                 out.append(self._event(NEW_DEVICE, dev, "new device on network"))
             return out
         if not prev.online:
-            out.append(self._event(DEVICE_ONLINE, dev, "device back online"))
+            gap = f" (last seen {ago(now - prev.last_seen)} ago)" if prev.last_seen else ""
+            out.append(self._event(DEVICE_ONLINE, dev, f"device back online{gap}"))
         if prev.ip != host.ip:
             out.append(self._event(IP_CHANGED, dev, f"ip changed {prev.ip} -> {host.ip}"))
         return out

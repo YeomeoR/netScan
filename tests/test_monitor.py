@@ -218,3 +218,46 @@ def test_concurrent_observers_announce_a_new_device_once(rt):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert sum(len([e for e in r if e.kind == "new_device"]) for r in results) == 1, "sweep + ARP watch racing must not double alert"
+
+
+def test_ntfy_headline_identifies_the_device_not_its_hostname(tmp_path):
+    from netscan.store import Store
+
+    s = Store(tmp_path / "n.db")
+    s.upsert_device(TV.mac, TV.ip, "Samsung", "router-made-name", 100)
+    post = Poster()
+    a = Alerter(AlertConfig(ntfy_url="https://ntfy.invalid/t"), post, s)
+    a.dispatch([new_event()])
+    headers, body = post.calls[-1][2], post.calls[-1][1].decode()
+    assert headers["Title"].startswith("Samsung ") and "router-made-name" not in headers["Title"]
+    assert headers["Title"].endswith(": new device") and TV.mac[-5:] in headers["Title"]
+    assert "Hostname: router-made-name" in body and f"MAC: {TV.mac}" in body and "Vendor: Samsung" in body
+
+    s.set_meta(TV.mac, 200, label="Lounge TV \u2019s", owner="Sam")
+    a.dispatch([new_event()])
+    headers, body = post.calls[-1][2], post.calls[-1][1].decode()
+    assert headers["Title"].startswith("=?UTF-8?B?"), "non-ascii titles are sent as an encoded word, not rejected"
+    assert "Owner: Sam" in body and "Name: Lounge TV" in body
+    s.close()
+
+
+def test_back_online_alert_respects_notify_on_and_reports_the_gap(rt):
+    rt.tracker.observe([PHONE], now=1000)
+    rt.tracker.mark_offline(offline_after=60, now=2000)
+    events = rt.tracker.observe([PHONE], now=1000 + 2 * 3600)
+    online = next(e for e in events if e.kind == "device_online")
+    assert "last seen" in online.message and "ago" in online.message
+    post = Poster()
+    Alerter(AlertConfig(ntfy_url="https://n.invalid/t", webhook_url="https://h.invalid"), post, rt.store).dispatch([online])
+    assert post.calls == [], "device_online is not in the default notify_on"
+
+
+def test_alert_says_why_when_a_device_override_forces_it(tmp_path):
+    from netscan.store import Store
+
+    s = Store(tmp_path / "w.db")
+    s.set_meta(PHONE.mac, 1, alert="always")
+    post = Poster()
+    Alerter(AlertConfig(ntfy_url="https://n.invalid/t"), post, s).dispatch([Event("device_online", PHONE.mac, PHONE.ip, "device back online")])
+    assert "Sent because: this device is set to 'Always alert'" in post.calls[0][1].decode()
+    s.close()

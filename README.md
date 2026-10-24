@@ -117,6 +117,8 @@ webhook_url = "https://example.invalid/hook"      # POSTs JSON {kind, message, i
 notify_on = ["new_device", "ip_conflict", "arp_spoof", "rogue_dhcp", "port_opened"]   # the default
 ```
 
+ntfy messages are headlined by the device (your own name for it, else vendor plus the last two MAC bytes, else "Private MAC ..."), for example `Samsung 77:25: new device`; the body lists IP, MAC, vendor, hostname, owner, type, review status, how long the device has been known, which machine sent it and, when a device's "Always alert" setting forced a message the alert settings would not send, that reason. The hostname is a detail, not the headline. Webhook JSON gained `name`, `owner`, `category`, `trust`, `private_mac`, `first_seen`, `sent_by` and `why`. "Back online" messages say how long the device was unseen.
+
 Terminal/journal logging is always on. Webhook/ntfy failures are logged and never stop the daemon. Only `http(s)` URLs are accepted. The dashboard's **System > Alerts** card edits the same settings (stored in the database, they win over `config.toml`), sends a test message, and a device can be set to "always alert" or "never alert" in its details. Secrets are never sent back to the browser, only the host.
 
 ## Web dashboard (Mac and Pi, same GUI)

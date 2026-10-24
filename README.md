@@ -5,6 +5,8 @@ A fing-lite scanner and controller for **your own home network**, terminal-first
 > **Only use netScan on networks you own or are explicitly authorised to administer.**
 > It shows this notice on first run and will not run until you acknowledge it. It refuses to scan, probe or block anything outside the subnet allow-list in your config, and never blocks the gateway or the machine it runs on. There is deliberately nothing in here for third-party networks.
 
+**New here?** [`docs/HOWTO.md`](docs/HOWTO.md) is the step-by-step guide: a command cheat sheet first, then install, Pi setup, iPhone access, updates, blocking, alerts and troubleshooting.
+
 ## What it does
 
 | Feature | How |

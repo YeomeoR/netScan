@@ -1,0 +1,30 @@
+[Unit]
+Description=netScan daemon + web dashboard (own network only)
+After=network-online.target
+Wants=network-online.target
+# the dashboard runs the same background work as netscan.service; never run both at once
+Conflicts=netscan.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/netScan
+Environment=NETSCAN_HOME=/var/lib/netscan
+# 0.0.0.0 = reachable from the LAN; the bearer token in /var/lib/netscan/web_token is required for every API call
+ExecStart=/opt/netScan/.venv/bin/netscan --accept-terms web --daemon --host 0.0.0.0 --port 8787
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=10
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# /opt/netScan must be writable so the dashboard can update itself from GitHub (git pull + pip install)
+ReadWritePaths=/var/lib/netscan /opt/netScan
+StateDirectory=netscan
+User=netscan
+Group=netscan
+
+[Install]
+WantedBy=multi-user.target

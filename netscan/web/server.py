@@ -32,7 +32,7 @@ from netscan.web.errors import ApiError
 log = logging.getLogger("netscan.web.http")
 
 MAX_BODY = 64 * 1024
-STATIC_FILES = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/help.js": "help.js", "/extra.js": "extra.js", "/updates.js": "updates.js", "/spoof.js": "spoof.js", "/identify.js": "identify.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
+STATIC_FILES = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/help.js": "help.js", "/extra.js": "extra.js", "/updates.js": "updates.js", "/spoof.js": "spoof.js", "/identify.js": "identify.js", "/networks.js": "networks.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 
 
@@ -103,6 +103,10 @@ def build_routes(c: Controller) -> list[Route]:
         r("GET", "/api/update", lambda m, q, b: c.update_status(q.get("force", ["0"])[0] == "1")),
         r("PUT", "/api/update", lambda m, q, b: c.set_update_auto(b)),
         r("POST", "/api/update/apply", lambda m, q, b: c.submit_update()),
+        r("PUT", "/api/network/follow", lambda m, q, b: c.set_follow_network(b)),
+        r("GET", "/api/wifi", lambda m, q, b: c.wifi_status()),
+        r("POST", "/api/wifi/scan", lambda m, q, b: c.wifi_scan()),
+        r("POST", "/api/wifi/connect", lambda m, q, b: c.wifi_connect(b)),
         r("GET", "/api/spoof", lambda m, q, b: c.spoof_status()),
         r("POST", "/api/spoof", lambda m, q, b: c.submit_spoof(b)),
         r("POST", "/api/spoof/restore", lambda m, q, b: c.submit_unspoof()),

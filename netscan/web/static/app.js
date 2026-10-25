@@ -4,6 +4,7 @@ import { createExtra } from "/extra.js";
 import { createUpdates } from "/updates.js";
 import { createSpoof } from "/spoof.js";
 import { createIdentify } from "/identify.js";
+import { createNetworks } from "/networks.js";
 // Every piece of data from the network (hostnames, vendors) is inserted with textContent via h(),
 // never innerHTML, so a device cannot inject markup into this page.
 
@@ -317,6 +318,7 @@ function trafficTable(rows) {
 const updates = createUpdates({ h, clear, api, act, toast, state, ago, fmtTime, rerender: () => { if (shell) { updateShell(); views[state.tab].update(); } } });
 const spoof = createSpoof({ h, clear, api, act, toast, state, fmtDur, fmtTime, label, rerender: () => { if (shell) views[state.tab].update(); } });
 const identify = createIdentify({ h, clear, api, act, toast, closeModal, state, ago, fmtTime, fmtDur, fmtBytes, refresh: () => refresh(), rerender: () => { if (shell) views[state.tab].update(); } });
+const networks = createNetworks({ h, clear, api, act, toast, state, refresh: () => refresh() });
 const extra = createExtra({ h, clear, api, act, toast, modal, closeModal, field, state, ago, fmtTime, fmtDur, until, refresh: () => refresh(), openDevice: (m) => openDevice(m), label, isProtected });
 
 // ---------- views ----------
@@ -606,11 +608,11 @@ views.blocks = (() => {
 })();
 
 views.system = (() => {
-  let setup, services, tools, cfg, about, alertsBox, updatesBox, spoofBox, identBox;
+  let setup, services, tools, cfg, about, alertsBox, updatesBox, spoofBox, identBox, netBox;
   return {
     mount(root) {
-      setup = h("div"); services = h("div", { class: "card" }); tools = h("div", { class: "card" }); cfg = h("div", { class: "card" }); about = h("div", { class: "card" }); alertsBox = h("div"); updatesBox = h("div"); spoofBox = h("div"); identBox = h("div");
-      root.append(setup, h("div", { class: "grid2" }, services, tools), h("div", { class: "grid2" }, alertsBox, cfg), h("div", { class: "grid2" }, updatesBox, about), h("div", { class: "grid2" }, spoofBox, identBox));
+      setup = h("div"); services = h("div", { class: "card" }); tools = h("div", { class: "card" }); cfg = h("div", { class: "card" }); about = h("div", { class: "card" }); alertsBox = h("div"); updatesBox = h("div"); spoofBox = h("div"); identBox = h("div"); netBox = h("div");
+      root.append(setup, netBox, h("div", { class: "grid2" }, services, tools), h("div", { class: "grid2" }, alertsBox, cfg), h("div", { class: "grid2" }, updatesBox, about), h("div", { class: "grid2" }, spoofBox, identBox));
       extra.loadAlerts().then(() => this.update());
       identify.loadSettings().then(() => { if (state.tab === "system") this.update(); });
       updates.load(true).then(() => { if (state.tab === "system") { updateShell(); this.update(); } });
@@ -637,6 +639,7 @@ views.system = (() => {
       clear(alertsBox).append(extra.alertsCard());
       clear(updatesBox).append(updates.card());
       if (!spoofBox.contains(document.activeElement)) clear(spoofBox).append(spoof.card());
+      { const nc = networks.card(); if (nc.parentNode !== netBox) netBox.append(nc); }
       if (!identBox.contains(document.activeElement)) clear(identBox).append(identify.card());
       const c = state.config;
       clear(cfg).append(h("h2", {}, "Configuration (edit in config.toml)"));

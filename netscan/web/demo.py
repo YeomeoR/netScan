@@ -18,6 +18,7 @@ from netscan.net import DhcpOffer, LocalNet
 from netscan.parsing import Host
 from netscan.safety import record_acceptance
 from netscan.store import Store, TrafficRow
+from netscan.wifi import WifiError, WifiManager
 
 NETWORK = "192.168.77.0/24"
 HOST = Host("192.168.77.10", "dc:a6:32:00:77:10")
@@ -171,3 +172,29 @@ def demo_setup() -> tuple[Config, DemoTransport, Callable[[str], str]]:
     seed_identity(store)
     store.close()
     return cfg, DemoTransport(), demo_resolver
+
+
+class DemoWifi(WifiManager):
+    """Pretend radio for demo mode: a few neighbours, and a join that succeeds unless the password is 'wrong'."""
+
+    NEARBY = [("Gran's Wi-Fi", 82, "WPA2"), ("BT-Hub6-4F2K", 61, "WPA2"), ("Cafe Guest", 40, "Open"), ("DIRECT-roku-381", 25, "WPA2")]
+
+    def __init__(self) -> None:
+        super().__init__(system="Demo")
+        self._joined = "Home Wi-Fi"
+
+    @property
+    def unsupported(self) -> str:
+        return ""
+
+    def scan(self) -> dict:
+        nets = [{"ssid": "Home Wi-Fi", "signal": -45, "quality": 95, "security": "WPA2", "channel": 6, "current": self._joined == "Home Wi-Fi"}]
+        nets += [{"ssid": n, "signal": None, "quality": q, "security": sec, "channel": 11, "current": self._joined == n} for n, q, sec in self.NEARBY]
+        return {"interface": "en0", "networks": nets, "current": self._joined, "redacted": False, "saved": ["Office"]}
+
+    def connect(self, ssid: str, password: str = "") -> str:
+        time.sleep(0.5)
+        if password == "wrong":
+            raise WifiError("could not join that network. Check the password.")
+        self._joined = ssid
+        return "en0"

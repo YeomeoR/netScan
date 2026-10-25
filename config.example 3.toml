@@ -1,0 +1,33 @@
+# netScan configuration. Only use netScan on a network you own.
+
+[network]
+# allow-list: netScan refuses to scan or block anything outside these subnets
+allowed_subnets = ["192.168.1.0/24"]
+# follow_network = true # laptop use: also allow whichever private network you are connected to
+# interface = "en0"      # auto-detected when empty
+# gateway = "192.168.1.1" # auto-detected when empty
+# gateway_mac = "aa:bb:cc:dd:ee:ff" # pin your router's MAC: refuse a different network with the same subnet
+
+[safety]
+# extra ips or macs that must never be blocked (gateway and this host are always protected)
+extra_protected = []
+
+[block]
+# arp = ARP cutoff (works from any host on the lan, needs root and `netscan enforce`/daemon running)
+# iptables / nftables = Linux only, effective when this machine is the gateway/router
+method = "arp"
+
+[alerts]
+# webhook_url = "https://example.invalid/hook"
+# ntfy_url = "https://ntfy.sh/your-private-topic"
+# ntfy_token = ""
+notify_on = ["new_device", "ip_conflict", "arp_spoof", "rogue_dhcp", "port_opened"]
+# also: "device_online", "device_offline", "ip_changed", "blocked", "unblocked"
+# The dashboard (System > Alerts) can override all of this; "Reset to config file" removes the overrides.
+
+[daemon]
+sweep_interval = 300   # seconds between automated sweeps
+offline_after = 900    # seconds without sighting before a device is marked offline
+arp_watch = true       # listen for ARP to spot new devices between sweeps
+capture_traffic = false # record per-device traffic metadata (see README for capture limits)
+silent_baseline = true # first sweep seeds the inventory without alerting per device

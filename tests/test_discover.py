@@ -23,7 +23,7 @@ from netscan.monitor import Event
 from netscan.store import Store, TrafficRow
 from netscan.web.controller import Controller
 from netscan.web.errors import ApiError
-from tests.conftest import GW_IP, HOST_IP, PHONE, TV, FakeTransport
+from conftest import GW_IP, HOST_IP, PHONE, TV, FakeTransport
 
 
 # ------------------------------------------------------------------ builders
@@ -244,7 +244,7 @@ def test_watch_ignores_our_own_dhcp_probe_and_replies_and_empty_requests(rt):
 
 
 def test_watch_still_routes_arp_frames(rt):
-    from tests.test_monitor import arp_frame
+    from test_monitor import arp_frame
 
     Daemon(rt).handle_packet(arp_frame("192.168.1.90", "00:11:22:aa:bb:cc", op=1))
     assert rt.store.get_device("00:11:22:aa:bb:cc") is not None

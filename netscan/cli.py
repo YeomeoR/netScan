@@ -130,6 +130,12 @@ def _info_line(source: str, data: dict) -> str:
     return "; ".join(str(b) for b in bits if b) or "-"
 
 
+def make_demo_wifi():
+    from netscan.web.demo import DemoWifi
+
+    return DemoWifi()
+
+
 def make_demo_prober():
     from netscan.web.demo import DemoProber
 
@@ -430,7 +436,8 @@ def cmd_web(args, cfg, transport) -> int:
 
         updater = Updater(disabled_reason="Updates are switched off in demo mode.") if args.demo else None
         prober = make_demo_prober() if args.demo else make_prober()
-        controller = Controller(cfg, transport, daemon=args.daemon, resolver=resolver, updater=updater, prober=prober)
+        wifi = make_demo_wifi() if args.demo else None
+        controller = Controller(cfg, transport, daemon=args.daemon, resolver=resolver, updater=updater, prober=prober, wifi=wifi)
         if args.demo:
             controller.spoofer.disabled_reason = "Changing the MAC address is switched off in demo mode."
         server = make_server(controller, args.host, args.port, token)

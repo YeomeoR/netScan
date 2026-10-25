@@ -37,6 +37,8 @@ from netscan.spoof import Spoofer
 from netscan.update import Updater
 from netscan.web.rules import RuleEngine
 from netscan.web.macspoof import SpoofMixin
+from netscan.web.networking import NetworkMixin
+from netscan.wifi import WifiManager
 from netscan.web.selfupdate import UpdateMixin
 from netscan.web.schedule import (
     Scheduler, initial_next_run, normalise_sweep_params, timing_changed, validate_schedule,
@@ -144,7 +146,7 @@ def describe_summary(kind: str, summary: dict) -> str:
     return ""
 
 
-class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
+class Controller(FeatureMixin, UpdateMixin, SpoofMixin, NetworkMixin):
     _device_dict = staticmethod(device_dict)
 
     def __init__(
@@ -161,8 +163,10 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
         spoofer: Spoofer | None = None,
         update_tick: float = 300.0,
         prober=None,
+        wifi: WifiManager | None = None,
     ):
         self.prober = prober
+        self.wifi = wifi or WifiManager()
         self.cfg = cfg
         self.raw = transport or ScapyTransport()
         self.daemon_mode = daemon
@@ -335,6 +339,7 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin):
             "version": __version__,
             "boot_id": self.boot_id,
             "spoof": self.spoof_status(),
+            "wifi": self.wifi_status(),
             "now": now,
             "tz": time.strftime("%Z", time.localtime(now)),
             "utc_offset": -(time.altzone if time.localtime(now).tm_isdst > 0 else time.timezone),

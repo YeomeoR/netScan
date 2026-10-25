@@ -53,6 +53,9 @@ source .venv/bin/activate
 | Scan without reverse DNS lookups | `netscan scan --no-hostnames` |
 | List known devices (no network access) | `netscan list` |
 | Detail for one device | `netscan show 192.168.1.20` (or a MAC) |
+| Ask devices what they are (names, models, services) | `sudo -E .venv/bin/netscan identify` |
+| Identify one device, skipping the port check | `netscan identify 192.168.1.20 --no-ports` |
+| Allow whichever network the Mac is on (laptop use) | `netscan init --force --follow` |
 | Capture traffic metadata for 60 s | `sudo -E .venv/bin/netscan traffic --duration 60` |
 | Block a device | `netscan block 192.168.1.20 --reason "bedtime"` |
 | Keep blocks enforced | `sudo -E .venv/bin/netscan enforce` |
@@ -419,6 +422,23 @@ netscan show 192.168.1.20
 netscan show aa:bb:cc:dd:ee:ff
 ```
 
+### Identify devices (what is this thing?)
+
+Dashboard: open a device and press Identify, or System tab > Identify all online devices. Terminal: `sudo -E .venv/bin/netscan identify` for every online device, or `netscan identify 192.168.1.20` for one. Add `--no-ports` to skip the web/SSH port check and banner reading.
+
+netScan asks each device what it is and keeps the answers in the `device_info` table. Sources:
+
+- Bonjour/mDNS: the device's own name, model and services (AirPlay, printers, Chromecast and so on).
+- UPnP/SSDP: manufacturer, model name and friendly name (TVs, consoles, routers, speakers).
+- NetBIOS: Windows and Samba machine names.
+- DHCP: the name and vendor class a device announces when it asks for an address. This is passive, so the Watch service listens for it and root is needed.
+- TTL and banners: a guess at the operating system, plus the greeting from web and SSH ports.
+- Behaviour: usual hours, how often it drops off, how long it was offline, whether the MAC is randomised and the places it talks to.
+
+Alerts (ntfy) lead with the best identifying name found, not the hostname. The automatic run covers each device at most once every 6 hours. Automatic identification can be switched on or off on the System tab, and the API is `POST /api/identify` and `GET`/`PUT /api/identify/settings`.
+
+Limits: a sleeping device may not answer, a private (randomised) MAC hides the vendor, and many devices only answer some of the sources. Nothing is guessed from outside your allowed subnet.
+
 ### Events
 
 Dashboard: Activity tab. Terminal: `netscan events`. It records new devices, online/offline changes, IP changes, blocks and unblocks.
@@ -616,6 +636,14 @@ If you replace your router or move house, run `netscan init --force` (stop the s
 
 **Using the Mac on other networks (family and friends, with their say-so).** Run `netscan init --force --follow` (or tick "I move between networks" on the dashboard's first-run card). That writes `follow_network = true` and does not pin a router. From then on netScan allows whichever private network the Mac is connected to, as well as anything in `allowed_subnets`. The same limits apply: private IPv4 only, no larger than a /16, and a public network is refused. Press "Re-detect network" on the System tab after joining a new network (services stopped). Keep the Pi's config as it is; it stays on the home network. All networks share one database, so use a separate `NETSCAN_HOME` per place if you want the lists kept apart. Leave Block and MAC changing alone on other people's networks.
 
+**Follow a network from the dashboard (System tab > Networks).** The card shows the network the Mac is on and has three parts:
+
+1. "Follow whichever network I am on" switches `follow_network` on or off. It writes `config.toml` itself, so stop the services first and press Re-detect network afterwards. With it on, the router pin is ignored and the connected private network is allowed.
+2. Scan for networks lists nearby Wi-Fi (saved networks are marked). On macOS it uses `system_profiler`; newer macOS hides network names until Terminal has Location Services permission, in which case the list shows hidden entries and you can type the name instead.
+3. Choose a network, enter the password your friend gives you, and press Join. The password is used for the join only; it is never stored, logged or shown again. After joining, press Re-detect network and scan.
+
+Joining uses `networksetup` on macOS and `nmcli` on Linux. It is switched off on the Pi service because the Pi must stay on the home network. API: `PUT /api/network/follow`, `GET /api/wifi`, `POST /api/wifi/scan`, `POST /api/wifi/connect`. The join and scan code has been tested with simulated output only, not yet on every macOS version.
+
 Environment variables: `NETSCAN_HOME` (data folder), `NETSCAN_WEB_TOKEN` (token override), `NETSCAN_SOURCE` (path to the git clone used for updates), `NETSCAN_BRANCH` (branch the launcher and installer follow; default `main`).
 
 ---
@@ -699,7 +727,7 @@ pytest
 ```
 
 - Tests use a fake transport and in-memory packets, so they need no root and touch no network.
-- CI (`.github/workflows/ci.yml`) runs the suite on Python 3.10 and 3.12.
+- CI (`.github/workflows/ci.yml`) runs the suite on Python 3.10 and 3.12 with bare `pytest`, which does not put the repo root on the import path. In tests write `from conftest import ...` and `from test_monitor import ...`, never `from tests.conftest import ...`, or collection fails in CI.
 - After a change, reinstall (`pip install .`) if you did not use `-e`, so the Desktop launcher and `netscan` pick it up.
 - The frontend is plain JavaScript in `netscan/web/static/` with no build step.
 
@@ -712,6 +740,8 @@ Layout:
 | `netscan/net.py` | Network I/O behind a swappable transport |
 | `netscan/monitor.py`, `traffic.py`, `blocker.py`, `daemon.py` | Inventory, capture, blocking, background work |
 | `netscan/spoof.py` | Temporary MAC address changes |
+| `netscan/discover/`, `behaviour.py` | Device identification sources and behaviour analytics |
+| `netscan/wifi.py`, `web/networking.py` | Wi-Fi scan and join, follow-network switch |
 | `netscan/store.py` | SQLite storage |
 | `netscan/web/` | Dashboard: `server.py` (JSON API), `controller.py` (jobs, services, schedules), `static/` (frontend) |
 | `deploy/` | `install-pi.sh`, the systemd units, `mac-launch.sh` |

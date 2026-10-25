@@ -64,7 +64,7 @@ def build_runtime(cfg: Config, transport: Transport | None = None, resolve_hostn
         gw_mac = guarded.resolve_mac(gateway, local.interface) if gateway else None
     except Exception:  # noqa: BLE001 best effort; the gateway ip is protected regardless
         gw_mac = None
-    if cfg.gateway_mac and normalise_mac(cfg.gateway_mac) != gw_mac:
+    if cfg.gateway_mac and not cfg.follow_network and normalise_mac(cfg.gateway_mac) != gw_mac:
         # the allow-list is just a CIDR, and 192.168.1.0/24 is also someone else's wifi; pinning the router's MAC tells them apart
         raise OutOfScopeError(
             f"gateway MAC {gw_mac or 'unknown'} does not match network.gateway_mac {cfg.gateway_mac}; this does not look like your network, refusing"

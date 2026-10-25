@@ -592,3 +592,103 @@ def test_config_view_never_leaks_secret_urls(home):
         assert "secret" not in dumped and "ntfy" in dumped
     finally:
         ctl.close()
+
+
+# ---- networks: follow switch and Wi-Fi ----
+
+class FakeWifi:
+    """A WifiManager with no radio: a fixed scan, and a join that fails for the password 'wrong'."""
+
+    unsupported = ""
+
+    def __init__(self):
+        self.joined = []
+
+    def scan(self):
+        return {"interface": "en0", "networks": [{"ssid": "Gran", "signal": -60, "quality": 75, "security": "WPA2", "channel": 6, "current": False}],
+                "current": "Home", "redacted": False, "saved": ["Office"]}
+
+    def connect(self, ssid, password=""):
+        from netscan.wifi import WifiError
+
+        if password == "wrong":
+            raise WifiError("could not join that network. Check the password.")
+        self.joined.append((ssid, password))
+        return "en0"
+
+
+@pytest.fixture
+def wifi_api(home):
+    from conftest import FakeTransport as FT
+
+    other = FT(network="192.168.50.0/24", local_ip="192.168.50.7", gateway="192.168.50.1")
+    wifi = FakeWifi()
+    ctl = make_ctl(home, other, wifi=wifi)
+    ctl.start()
+    server = make_server(ctl, "127.0.0.1", 0, TOKEN)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    yield Client(server.server_address[1]), wifi, ctl
+    server.shutdown()
+    server.server_close()
+    ctl.close()
+
+
+def test_follow_switch_unlocks_the_connected_network_and_persists_to_config(wifi_api, home):
+    api, _, _ = wifi_api
+    status = api.get("/api/status")[1]
+    assert status["ready"] is False and status["follow_network"] is False, "a network outside the allow-list is refused until followed"
+    code, after = api.call("PUT", "/api/network/follow", {"follow_network": True})
+    assert code == 200 and after["ready"] is True and after["follow_network"] is True, "following must make the connected network usable at once"
+    assert "follow_network = true" in (home / "config.toml").read_text(), "the switch must be saved in config.toml"
+    code, back = api.call("PUT", "/api/network/follow", {"follow_network": False})
+    assert code == 200 and back["ready"] is False, "switching off must put the allow-list back in charge"
+    assert api.call("PUT", "/api/network/follow", {"follow_network": "yes"})[0] == 400, "only a real true or false is accepted"
+
+
+def test_follow_switch_is_refused_while_services_run(api):
+    assert api.post("/api/services/enforce/start")[0] == 200
+    code, err = api.call("PUT", "/api/network/follow", {"follow_network": True})
+    assert code == 409 and "stop" in err["error"], "running services would keep the old scope, so they must be stopped first"
+
+
+def test_wifi_scan_and_join_refreshes_the_network_and_never_echoes_the_password(wifi_api):
+    api, wifi, ctl = wifi_api
+    api.call("PUT", "/api/network/follow", {"follow_network": True})
+    assert api.get("/api/status")[1]["wifi"] == {"supported": True, "reason": ""}
+    code, scan_out = api.post("/api/wifi/scan")
+    assert code == 200 and scan_out["networks"][0]["ssid"] == "Gran" and scan_out["saved"] == ["Office"]
+    code, out = api.post("/api/wifi/connect", {"ssid": " Gran ", "password": "hunter2hunter2"})
+    assert code == 200 and out["connected"] == "Gran" and out["ready"] is True, out
+    assert wifi.joined == [("Gran", "hunter2hunter2")], "the name is trimmed and the password reaches the join untouched"
+    assert "hunter2" not in json.dumps(out) and "hunter2" not in json.dumps(api.get("/api/events")[1]), "the password must not come back or be recorded"
+
+
+def test_wifi_join_reports_not_ready_when_the_new_network_is_outside_the_allow_list(wifi_api):
+    api, _, _ = wifi_api
+    code, out = api.post("/api/wifi/connect", {"ssid": "Gran", "password": "hunter2hunter2"})
+    assert code == 200 and out["ready"] is False and "not inside the allowed" in out["problem"], "joined but not followed must say why netScan cannot scan it"
+
+
+def test_wifi_join_validates_input_and_surfaces_failures(wifi_api):
+    api, _, _ = wifi_api
+    for body in ({}, {"ssid": ""}, {"ssid": "x" * 33}, {"ssid": "ok", "password": "p" * 64}, {"ssid": 5}):
+        assert api.post("/api/wifi/connect", body)[0] == 400, body
+    code, err = api.post("/api/wifi/connect", {"ssid": "Gran", "password": "wrong"})
+    assert code == 409 and "password" in err["error"], "a failed join is reported, not swallowed"
+
+
+def test_wifi_join_is_refused_while_services_run_and_on_an_always_on_monitor(wifi_api, home):
+    api, _, _ = wifi_api
+    from conftest import FakeTransport as FT
+
+    api.call("PUT", "/api/network/follow", {"follow_network": True})
+    assert api.post("/api/services/enforce/start")[0] == 200
+    assert api.post("/api/wifi/connect", {"ssid": "Gran"})[0] == 409, "services must be stopped before the network moves under them"
+    monitor = make_ctl(home, FT(), daemon=True, wifi=FakeWifi())
+    try:
+        status = monitor.wifi_status()
+        assert status["supported"] is False and "always-on" in status["reason"], "the Pi service must not be allowed to switch its own Wi-Fi"
+        with pytest.raises(ApiError):
+            monitor.wifi_scan()
+    finally:
+        monitor.close()

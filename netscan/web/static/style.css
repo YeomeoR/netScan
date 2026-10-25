@@ -198,3 +198,7 @@ details.src { margin: 4px 0; padding: 6px 10px; border: 1px solid var(--line); b
 details.src summary { cursor: pointer; font-weight: 600; }
 details.src[open] summary { margin-bottom: 6px; }
 .reasons { margin: 6px 0; }
+.netlist { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; max-height: 260px; overflow-y: auto; }
+.netrow { display: flex; justify-content: space-between; gap: 12px; align-items: center; text-align: left; font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+.netrow:hover { border-color: var(--accent); }
+.netrow.selected { border-color: var(--accent); background: var(--info-bg); }

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netscan"
+version = "0.1.0"
+description = "fing-lite home network scanner and controller (own networks only)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "rich>=13",
+    "scapy>=2.5",
+    "tomli>=2; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=5"]
+
+[project.scripts]
+netscan = "netscan.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["netscan*"]
+
+[tool.setuptools.package-data]
+netscan = ["data/*.gz"]
+"netscan.web" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

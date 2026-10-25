@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -154,6 +155,27 @@ def load_config(path: Path | None = None, home: Path | None = None) -> Config:
     if cfg.gateway_mac and not normalise_mac(cfg.gateway_mac):
         raise ConfigError(f"network.gateway_mac {cfg.gateway_mac!r} is not a valid MAC")
     return cfg
+
+
+def write_follow_network(path: Path, value: bool) -> None:
+    """Set network.follow_network in place, keeping the rest of the file (comments included) as the user wrote it."""
+    text = Path(path).read_text(encoding="utf-8")
+    lines = [ln for ln in text.splitlines(keepends=True) if not re.match(r"^\s*#?\s*follow_network\s*=", ln)]
+    new = f"follow_network = {'true' if value else 'false'}\n"
+    for i, ln in enumerate(lines):
+        if ln.strip() == "[network]":
+            lines.insert(i + 1, new)
+            break
+    else:
+        lines += ["" if not lines or lines[-1].endswith("\n") else "\n", "\n[network]\n", new]
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text("".join(lines), encoding="utf-8")
+    try:
+        load_config(tmp, Path(path).parent)  # never leave a file that will not load
+    except ConfigError:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(path)
 
 
 CONFIG_TEMPLATE = """\

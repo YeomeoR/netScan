@@ -12,6 +12,7 @@ from netscan.config import Config, parse_subnets
 from netscan.net import GuardedTransport, LocalNet, ScapyTransport, Transport
 from netscan.monitor import DeviceTracker
 from netscan.oui import OuiDb
+from netscan.profiles import legacy_home, network_db_path, network_id, open_store
 from netscan.parsing import Host
 from netscan.macutil import normalise_mac
 from netscan.safety import OutOfScopeError, Scope
@@ -29,6 +30,7 @@ class Runtime:
     tracker: DeviceTracker
     alerter: Alerter
     gateway_mac: str = ""
+    network_id: str = ""  # set when this network's data lives in its own file
 
 
 def reverse_dns(ip: str, timeout: float = 2.0) -> str:
@@ -71,10 +73,21 @@ def build_runtime(cfg: Config, transport: Transport | None = None, resolve_hostn
         )
     if gw_mac:
         scope.add_protected(gw_mac)
-    store = Store(cfg.db_path)
+    store = open_store(cfg)
+    net_id = ""
+    if cfg.follow_network or store.network_path is not None:
+        net_id = attach_current_network(cfg, store, local, gw_mac or "")
     oui = OuiDb.load(cfg.oui_path)
     tracker = DeviceTracker(store, oui, scope, resolve_hostname, cfg.daemon.silent_baseline)
-    return Runtime(cfg, scope, guarded, local, store, oui, tracker, Alerter(cfg.alerts, store=store), gateway_mac=gw_mac or normalise_mac(cfg.gateway_mac) or "")
+    return Runtime(cfg, scope, guarded, local, store, oui, tracker, Alerter(cfg.alerts, store=store), gateway_mac=gw_mac or normalise_mac(cfg.gateway_mac) or "", network_id=net_id)
+
+
+def attach_current_network(cfg: Config, store: Store, local: LocalNet, gw_mac: str) -> str:
+    """Give the network this machine is on its own device list, and note it in the list of networks seen."""
+    net_id = network_id(gw_mac, str(local.network))
+    store.attach_network(net_id, network_db_path(cfg, net_id), legacy_home(cfg))
+    store.touch_network(net_id, str(local.network), gw_mac)
+    return net_id
 
 
 def sweep(rt: Runtime, timeout: float = 3.0, now: float | None = None, resolve_names: bool = True):

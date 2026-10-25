@@ -21,6 +21,7 @@ from netscan.config import ConfigError, load_config
 from netscan.macutil import normalise_mac
 from netscan.net import ScapyTransport
 from netscan.oui import update_oui
+from netscan.profiles import open_store
 from netscan.runtime import Runtime, build_runtime, reverse_dns, sweep, write_initial_config
 from netscan.safety import NoticeNotAcceptedError, SafetyError, ensure_notice
 from netscan.store import Block, Device, Store
@@ -274,7 +275,7 @@ def cmd_scan(args, cfg, transport) -> int:
 
 
 def cmd_list(args, cfg, transport) -> int:
-    store = Store(cfg.db_path)
+    store = open_store(cfg)
     devices = store.list_devices()
     if not devices:
         console.print("No devices recorded yet. Run `netscan scan` first.")
@@ -284,7 +285,7 @@ def cmd_list(args, cfg, transport) -> int:
 
 
 def cmd_show(args, cfg, transport) -> int:
-    store = Store(cfg.db_path)
+    store = open_store(cfg)
     from netscan.macutil import normalise_mac
 
     dev = store.find_device(normalise_mac(args.target) or args.target)
@@ -353,7 +354,7 @@ def cmd_unblock(args, cfg, transport) -> int:
 
 
 def cmd_blocks(args, cfg, transport) -> int:
-    blocks = Store(cfg.db_path).list_blocks()
+    blocks = open_store(cfg).list_blocks()
     console.print(blocks_table(blocks) if blocks else "No blocked devices.")
     return 0
 
@@ -397,7 +398,7 @@ def cmd_daemon(args, cfg, transport) -> int:
 
 
 def cmd_events(args, cfg, transport) -> int:
-    rows = Store(cfg.db_path).recent_events(30)
+    rows = open_store(cfg).recent_events(30)
     table = Table(title="Recent events", header_style="bold")
     for col in ("Time", "Kind", "IP", "MAC", "Message"):
         table.add_column(col)
@@ -477,7 +478,7 @@ def cmd_update(args, cfg, transport) -> int:
     from netscan.update import UpdateError, Updater
 
     if args.auto:
-        store = Store(cfg.db_path)
+        store = open_store(cfg)
         try:
             store.set_setting("update", {"auto": args.auto == "on"})
         finally:
@@ -509,7 +510,7 @@ def cmd_update(args, cfg, transport) -> int:
 def cmd_spoof(args, cfg, transport) -> int:
     from netscan.spoof import SpoofError, Spoofer
 
-    store = Store(cfg.db_path)
+    store = open_store(cfg)
     spoofer = Spoofer(store)
     try:
         if args.action == "status":

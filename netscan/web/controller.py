@@ -26,6 +26,7 @@ from netscan.macutil import is_locally_administered, normalise_mac
 from netscan.monitor import BASELINE, DEVICE_OFFLINE, DEVICE_ONLINE, IP_CHANGED, NEW_DEVICE
 from netscan.net import ScapyTransport, Transport
 from netscan.oui import OuiDb, update_oui
+from netscan.profiles import legacy_home, network_db_path, open_store
 from netscan.runtime import Runtime, build_runtime, reverse_dns, sweep, write_initial_config
 from netscan.safety import NOTICE, SafetyError
 from netscan.store import Block, Device, DeviceMeta, JobRow, Schedule, Store
@@ -172,7 +173,7 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin, NetworkMixin):
         self.daemon_mode = daemon
         self.resolver = resolver
         self.clock = clock
-        self.store = Store(cfg.db_path)
+        self.store = open_store(cfg)
         self._rt: Runtime | None = None
         self._rt_error = ""
         self._rt_tried = 0.0
@@ -298,6 +299,8 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin, NetworkMixin):
             except Exception as exc:  # noqa: BLE001 no route, no interface, scapy missing...
                 self._rt_error = str(exc) or type(exc).__name__
                 raise ApiError(409, self._rt_error) from exc
+            if rt.network_id and rt.store.network_path is not None:
+                self.store.attach_network(rt.network_id, rt.store.network_path, legacy_home(self.cfg))
             # the previous runtime's store is left to the garbage collector: another thread may still hold it
             self._rt, self._rt_error = rt, ""
             return rt
@@ -309,6 +312,22 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin, NetworkMixin):
             self._rt = None
         self._runtime()
         return self.status()
+
+    def networks_summary(self) -> list[dict]:
+        """Every network this machine has kept a device list for, newest first."""
+        current = self._rt.network_id if self._rt else ""
+        out = []
+        for row in self.store.list_networks():
+            try:
+                path = network_db_path(self.cfg, row["id"])
+            except ValueError:
+                continue
+            count = self.store.count_devices() if row["id"] == current else Store.count_devices_in(path)
+            out.append({
+                "id": row["id"], "label": row["label"] or (f"Network {row['subnet']}" if row["subnet"] else row["id"]),
+                "subnet": row["subnet"], "devices": count, "last_seen": row["last_seen"], "current": row["id"] == current,
+            })
+        return out
 
     # status / reads
     def status(self) -> dict:
@@ -326,7 +345,7 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin, NetworkMixin):
             local = rt.local if rt else self.raw.local_net(self.cfg.interface)
             network = {
                 "interface": local.interface, "ip": local.ip, "mac": local.mac, "network": str(local.network),
-                "gateway": local.gateway_ip, "in_scope": rt is not None,
+                "gateway": local.gateway_ip, "in_scope": rt is not None, "id": rt.network_id if rt else "",
             }
         except Exception:  # noqa: BLE001 offline / no route: the UI shows the runtime error instead
             pass
@@ -352,6 +371,7 @@ class Controller(FeatureMixin, UpdateMixin, SpoofMixin, NetworkMixin):
             "allowed_subnets": [str(n) for n in self.cfg.allowed_subnets],
             "gateway_pinned": bool(self.cfg.gateway_mac),
             "follow_network": self.cfg.follow_network,
+            "networks": self.networks_summary(),
             "privileged": can_raw,
             "block_method": self.cfg.block_method,
             "counts": {

@@ -634,13 +634,19 @@ Rules enforced when the config loads: the allow-list must be private IPv4 and no
 
 If you replace your router or move house, run `netscan init --force` (stop the services first) so the router is pinned again.
 
-**Using the Mac on other networks (family and friends, with their say-so).** Run `netscan init --force --follow` (or tick "I move between networks" on the dashboard's first-run card). That writes `follow_network = true` and does not pin a router. From then on netScan allows whichever private network the Mac is connected to, as well as anything in `allowed_subnets`. The same limits apply: private IPv4 only, no larger than a /16, and a public network is refused. Press "Re-detect network" on the System tab after joining a new network (services stopped). Keep the Pi's config as it is; it stays on the home network. All networks share one database, so use a separate `NETSCAN_HOME` per place if you want the lists kept apart. Leave Block and MAC changing alone on other people's networks.
+**Using the Mac on other networks (family and friends, with their say-so).** Run `netscan init --force --follow` (or tick "I move between networks" on the dashboard's first-run card). That writes `follow_network = true` and does not pin a router. From then on netScan allows whichever private network the Mac is connected to, as well as anything in `allowed_subnets`. The same limits apply: private IPv4 only, no larger than a /16, and a public network is refused. Press "Re-detect network" on the System tab after joining a new network (services stopped). Keep the Pi's config as it is; it stays on the home network. With `follow_network` on, each network gets its own device list (see "One device list per network" below), so places do not mix. Leave Block and MAC changing alone on other people's networks.
 
 **Follow a network from the dashboard (System tab > Networks).** The card shows the network the Mac is on and has three parts:
 
 1. "Follow whichever network I am on" switches `follow_network` on or off. It writes `config.toml` itself, so stop the services first and press Re-detect network afterwards. With it on, the router pin is ignored and the connected private network is allowed.
 2. Scan for networks lists nearby Wi-Fi (saved networks are marked). On macOS it uses `system_profiler`; newer macOS hides network names until Terminal has Location Services permission, in which case the list shows hidden entries and you can type the name instead.
-3. Choose a network, enter the password your friend gives you, and press Join. The password is used for the join only; it is never stored, logged or shown again. After joining, press Re-detect network and scan.
+3. Choose a network, enter the password your friend gives you, and press **Join and scan** (join, switch following on, re-detect the network and start a scan in one go) or **Join only**. The password is used for the join only; it is never stored, logged or shown again. For a network the Mac already knows, leave the password empty. You need the password once per network, because macOS keeps it afterwards.
+
+Joining needs the services stopped. A network that needs a password cannot be scanned before you have joined it, and a hotel, train or cafe network is not yours to scan.
+
+**One device list per network.** With `follow_network = true` netScan keeps a separate SQLite file for each network in `networks/` next to `netscan.db`: `gw-<router MAC>.db` (or `net-<subnet>.db` when the router's MAC cannot be read). Devices, names and reviews, events, blocks, block rules, traffic, port checks and identification results are per network. Alerts, schedules, update settings, jobs and the access token are shared. The System tab lists each network with its device count; joining a network again, or pressing Re-detect after changing Wi-Fi by hand, switches to its list while the dashboard keeps running. The network is named after the Wi-Fi you joined from the card, otherwise after its subnet.
+
+The first time this switches on, your existing device list moves into the file for the router pinned in `gateway_mac` (or the network you are on, if none is pinned). The old tables stay in `netscan.db` as `legacy_*`, so nothing is deleted. `netscan list`, `show` and `events` read the list of the network the dashboard was last on. To start one network from scratch, stop netScan and delete its file in `networks/`. To go back to a single list, you would have to move a file's contents back yourself; the `legacy_*` tables are the pre-switch copy.
 
 Joining uses `networksetup` on macOS and `nmcli` on Linux. It is switched off on the Pi service because the Pi must stay on the home network. API: `PUT /api/network/follow`, `GET /api/wifi`, `POST /api/wifi/scan`, `POST /api/wifi/connect`. The join and scan code has been tested with simulated output only, not yet on every macOS version.
 
@@ -650,7 +656,7 @@ Environment variables: `NETSCAN_HOME` (data folder), `NETSCAN_WEB_TOKEN` (token 
 
 ## 17. Backups, data and resetting
 
-Everything is in the data folder, mainly `netscan.db` (SQLite), `config.toml` and `web_token`.
+Everything is in the data folder, mainly `netscan.db` (SQLite), `config.toml`, `web_token` and, when following networks, the per-network files in `networks/`.
 
 ### Back up the Pi
 

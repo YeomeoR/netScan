@@ -318,7 +318,7 @@ function trafficTable(rows) {
 const updates = createUpdates({ h, clear, api, act, toast, state, ago, fmtTime, rerender: () => { if (shell) { updateShell(); views[state.tab].update(); } } });
 const spoof = createSpoof({ h, clear, api, act, toast, state, fmtDur, fmtTime, label, rerender: () => { if (shell) views[state.tab].update(); } });
 const identify = createIdentify({ h, clear, api, act, toast, closeModal, state, ago, fmtTime, fmtDur, fmtBytes, refresh: () => refresh(), rerender: () => { if (shell) views[state.tab].update(); } });
-const networks = createNetworks({ h, clear, api, act, toast, state, refresh: () => refresh() });
+const networks = createNetworks({ h, clear, api, act, toast, state, ago, refresh: () => refresh() });
 const extra = createExtra({ h, clear, api, act, toast, modal, closeModal, field, state, ago, fmtTime, fmtDur, until, refresh: () => refresh(), openDevice: (m) => openDevice(m), label, isProtected });
 
 // ---------- views ----------

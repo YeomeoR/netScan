@@ -14,7 +14,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA = """
+# Tables that hold what one network looks like. With per-network data each network has its own file for these,
+# attached as `net`; SQLite resolves bare table names to whichever schema holds them, so the queries do not change.
+NETWORK_TABLES = ("devices", "blocks", "traffic", "events", "device_meta", "block_rules", "port_scans", "device_info")
+
+NETWORK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
     mac TEXT PRIMARY KEY,
     ip TEXT NOT NULL,
@@ -52,33 +56,6 @@ CREATE TABLE IF NOT EXISTS events (
     ip TEXT NOT NULL DEFAULT '',
     message TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS schedules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    kind TEXT NOT NULL,
-    every_seconds INTEGER NOT NULL DEFAULT 0,
-    at_time TEXT NOT NULL DEFAULT '',
-    run_at REAL,
-    params TEXT NOT NULL DEFAULT '{}',
-    next_run REAL,
-    last_run REAL,
-    last_status TEXT NOT NULL DEFAULT '',
-    last_message TEXT NOT NULL DEFAULT '',
-    created REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS jobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL,
-    source TEXT NOT NULL DEFAULT 'manual',
-    params TEXT NOT NULL DEFAULT '{}',
-    state TEXT NOT NULL,
-    created REAL NOT NULL,
-    started REAL,
-    finished REAL,
-    summary TEXT NOT NULL DEFAULT '{}',
-    error TEXT NOT NULL DEFAULT ''
-);
 CREATE TABLE IF NOT EXISTS device_meta (
     mac TEXT PRIMARY KEY,
     label TEXT NOT NULL DEFAULT '',
@@ -89,10 +66,6 @@ CREATE TABLE IF NOT EXISTS device_meta (
     track INTEGER NOT NULL DEFAULT 0,
     alert TEXT NOT NULL DEFAULT 'default',
     updated REAL NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS block_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,6 +96,50 @@ CREATE TABLE IF NOT EXISTS device_info (
     PRIMARY KEY (mac, source)
 );
 """
+
+APP_SCHEMA = """
+CREATE TABLE IF NOT EXISTS schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    kind TEXT NOT NULL,
+    every_seconds INTEGER NOT NULL DEFAULT 0,
+    at_time TEXT NOT NULL DEFAULT '',
+    run_at REAL,
+    params TEXT NOT NULL DEFAULT '{}',
+    next_run REAL,
+    last_run REAL,
+    last_status TEXT NOT NULL DEFAULT '',
+    last_message TEXT NOT NULL DEFAULT '',
+    created REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    params TEXT NOT NULL DEFAULT '{}',
+    state TEXT NOT NULL,
+    created REAL NOT NULL,
+    started REAL,
+    finished REAL,
+    summary TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS networks (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL DEFAULT '',
+    subnet TEXT NOT NULL DEFAULT '',
+    gateway_mac TEXT NOT NULL DEFAULT '',
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL
+);
+"""
+
+SCHEMA = APP_SCHEMA + NETWORK_SCHEMA
 
 
 @dataclass
@@ -227,11 +244,92 @@ class Store:
         self._conn = sqlite3.connect(str(path), check_same_thread=False, timeout=10)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
+        self._net_path: Path | None = None
         with self._lock:
             # WAL lets the CLI read while the daemon writes
             self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.executescript(SCHEMA)
+            self._conn.executescript(APP_SCHEMA)
+            # once the network tables have moved into per-network files, bare ones here would shadow them
+            if not self._has_table("main", "legacy_devices"):
+                self._conn.executescript(NETWORK_SCHEMA)
             self._conn.commit()
+
+    def _has_table(self, schema: str, name: str) -> bool:
+        return self._conn.execute(f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+    @property
+    def network_path(self) -> Path | None:
+        return self._net_path
+
+    def _attach(self, schema: str, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn.execute(f"ATTACH DATABASE ? AS {schema}", (str(path),))
+        self._conn.execute(f"PRAGMA {schema}.journal_mode=WAL")
+        self._conn.executescript(NETWORK_SCHEMA.replace("CREATE TABLE IF NOT EXISTS ", f"CREATE TABLE IF NOT EXISTS {schema}."))
+
+    def attach_network(self, net_id: str, path: Path, legacy_home: tuple[str, Path] | None = None) -> None:
+        """Point the network tables at this network's own file, keeping jobs, schedules and settings shared.
+
+        Network data that predates per-network files sits in the main file; it is copied into `legacy_home`
+        (id, path) or else this network, and the old tables are renamed legacy_* rather than deleted.
+        """
+        path = Path(path)
+        with self._lock:
+            if self._net_path == path:
+                return
+            self._conn.commit()
+            if self._net_path is not None:
+                self._conn.execute("DETACH DATABASE net")
+                self._net_path = None
+            self._attach("net", path)
+            old = [t for t in NETWORK_TABLES if self._has_table("main", t)]
+            if old and not self._has_table("main", "legacy_devices"):
+                home_id, home_path = legacy_home if legacy_home else (net_id, path)
+                schema = "net"
+                if home_path != path:
+                    schema = "home"
+                    self._attach(schema, home_path)
+                for table in old:
+                    cols = ", ".join(r["name"] for r in self._conn.execute(f"PRAGMA main.table_info({table})"))
+                    self._conn.execute(f"INSERT OR IGNORE INTO {schema}.{table}({cols}) SELECT {cols} FROM main.{table}")
+                self._conn.commit()
+                if schema == "home":
+                    self._conn.execute("DETACH DATABASE home")
+                for table in old:
+                    self._conn.execute(f"ALTER TABLE main.{table} RENAME TO legacy_{table}")
+                now = time.time()
+                self._conn.execute("INSERT OR IGNORE INTO networks(id, label, first_seen, last_seen) VALUES (?, 'Original network', ?, ?)", (home_id, now, now))
+            self._conn.execute("INSERT INTO settings(key, value) VALUES ('active_network', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(net_id),))
+            self._conn.commit()
+            self._net_path = path
+
+    def touch_network(self, net_id: str, subnet: str, gateway_mac: str, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        self._exec(
+            """INSERT INTO networks(id, label, subnet, gateway_mac, first_seen, last_seen) VALUES (?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET subnet=excluded.subnet, gateway_mac=excluded.gateway_mac, last_seen=excluded.last_seen""",
+            (net_id, "", subnet, gateway_mac, now, now),
+        )
+
+    def set_network_label(self, net_id: str, label: str) -> None:
+        self._exec("UPDATE networks SET label=? WHERE id=?", (label.strip()[:64], net_id))
+
+    def list_networks(self) -> list[dict]:
+        return [dict(r) for r in self._all("SELECT * FROM networks ORDER BY last_seen DESC")]
+
+    @staticmethod
+    def count_devices_in(path: Path) -> int:
+        """Device count of a network file we are not attached to, read-only; 0 if it is missing or unreadable."""
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+        except sqlite3.Error:
+            return 0
+        try:
+            return int(conn.execute("SELECT COUNT(*) FROM devices").fetchone()[0])
+        except sqlite3.Error:
+            return 0
+        finally:
+            conn.close()
 
     def close(self) -> None:
         with self._lock:

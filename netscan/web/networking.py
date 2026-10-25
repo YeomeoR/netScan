@@ -25,10 +25,7 @@ class NetworkMixin:
         if not status["supported"]:
             raise ApiError(409, status["reason"])
 
-    def set_follow_network(self, body: dict) -> dict:
-        value = body.get("follow_network") if isinstance(body, dict) else None
-        if not isinstance(value, bool):
-            raise ApiError(400, "follow_network must be true or false")
+    def _apply_follow(self, value: bool) -> None:
         if not self.cfg.config_path.exists():  # type: ignore[attr-defined]
             raise ApiError(409, "set netScan up first (Devices tab), then this can be switched")
         if any(s.running for s in self._services.values()):  # type: ignore[attr-defined]
@@ -42,6 +39,12 @@ class NetworkMixin:
             self.cfg = cfg  # type: ignore[attr-defined]
             self._rt = None  # type: ignore[attr-defined]
             self._rt_error = ""  # type: ignore[attr-defined]
+
+    def set_follow_network(self, body: dict) -> dict:
+        value = body.get("follow_network") if isinstance(body, dict) else None
+        if not isinstance(value, bool):
+            raise ApiError(400, "follow_network must be true or false")
+        self._apply_follow(value)
         return self.status()  # type: ignore[attr-defined]
 
     def wifi_scan(self) -> dict:
@@ -64,9 +67,17 @@ class NetworkMixin:
             raise ApiError(409, "stop the running services first; they would lose the network under them")
         if self.store.active_jobs():  # type: ignore[attr-defined]
             raise ApiError(409, "wait for the running scan or job to finish first")
+        scan = body.get("scan", False)
+        if not isinstance(scan, bool):
+            raise ApiError(400, "scan must be true or false")
+        switched = scan and not self.cfg.follow_network  # type: ignore[attr-defined]
+        if switched:
+            self._apply_follow(True)
         try:
             self.wifi.connect(ssid.strip(), password)
         except WifiError as exc:
+            if switched:
+                self._apply_follow(False)
             raise ApiError(409, str(exc)) from exc
         log.info("joined wifi network %r", ssid.strip())  # the password is never logged
         error = ""
@@ -79,4 +90,11 @@ class NetworkMixin:
                 error = exc.message
                 if exc.status == 403 or self._closed.wait(1.0):  # type: ignore[attr-defined]
                     break
-        return {"connected": ssid.strip(), "ready": not error, "problem": error}
+        job = None
+        if not error:
+            rt = self._rt  # type: ignore[attr-defined]
+            if rt is not None and rt.network_id:
+                self.store.set_network_label(rt.network_id, ssid.strip())  # type: ignore[attr-defined]
+            if scan:
+                job = self.submit_scan({})["id"]  # type: ignore[attr-defined]
+        return {"connected": ssid.strip(), "ready": not error, "problem": error, "job": job}

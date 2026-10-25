@@ -5,7 +5,7 @@
 const BARS = (q) => (q === null || q === undefined ? "" : q >= 70 ? "strong" : q >= 40 ? "good" : "weak");
 
 export function createNetworks(ctx) {
-  const { h, clear, api, act, toast, state, refresh } = ctx;
+  const { h, clear, api, act, toast, state, refresh, ago } = ctx;
   const root = h("div", { class: "card" });
   const draft = { scanning: false, joining: false, result: null, ssid: "", password: "", error: "", outcome: null };
 
@@ -15,16 +15,16 @@ export function createNetworks(ctx) {
     draft.scanning = false; render();
   }
 
-  async function join() {
+  async function join(scanAfter) {
     const ssid = draft.ssid.trim();
     if (!ssid) { toast("Pick a network or type its name.", true); return; }
-    const ok = confirm(`Join "${ssid}"?\n\nThis machine leaves its current Wi-Fi network, so this page may pause for a few seconds. Only join a network you have been given the password for.`);
+    const ok = confirm(`Join "${ssid}"${scanAfter ? " and scan it" : ""}?\n\nThis machine leaves its current Wi-Fi network, so this page may pause for a few seconds. Only join a network you have been given the password for.${scanAfter ? "\n\nnetScan will also start following whichever network you are on." : ""}`);
     if (!ok) return;
     draft.joining = true; draft.error = ""; draft.outcome = null; render();
     try {
-      draft.outcome = await api("POST", "/api/wifi/connect", { ssid, password: draft.password });
+      draft.outcome = await api("POST", "/api/wifi/connect", { ssid, password: draft.password, scan: !!scanAfter });
       draft.password = "";
-      toast(draft.outcome.ready ? `Joined ${ssid}` : `Joined ${ssid}, but netScan cannot use it yet`, !draft.outcome.ready);
+      toast(draft.outcome.ready ? (draft.outcome.job ? `Joined ${ssid}. Scanning it now` : `Joined ${ssid}`) : `Joined ${ssid}, but netScan cannot use it yet`, !draft.outcome.ready);
       draft.result = null;
     } catch (e) { if (e.message !== "unauthorised") draft.error = e.message; }
     draft.joining = false;
@@ -51,6 +51,17 @@ export function createNetworks(ctx) {
       h("span", { class: "muted small" }, [n.security, BARS(n.quality), n.channel ? `ch ${n.channel}` : ""].filter(Boolean).join(" · ")));
   }
 
+  function seenBlock(s) {
+    const list = s.networks || [];
+    if (!list.length) return s.follow_network ? h("p", { class: "muted small" }, "Each network you scan keeps its own device list, events and blocks. They appear here once you have scanned one.") : null;
+    return h("div", {},
+      h("h3", { class: "muted" }, "Networks with their own device list"),
+      h("div", { class: "netlist" }, list.map((n) => h("div", { class: `netrow${n.current ? " selected" : ""}` },
+        h("span", { class: "body" }, n.label, n.current ? [" ", h("span", { class: "badge on" }, "this network")] : null),
+        h("span", { class: "muted small" }, [n.subnet, `${n.devices} device${n.devices === 1 ? "" : "s"}`, n.last_seen ? `seen ${ago(n.last_seen)}` : ""].filter(Boolean).join(" · "))))),
+      h("p", { class: "muted small" }, "Devices, events, blocks, traffic and names are kept per network. Alerts, schedules and updates settings are shared. Join a network again to come back to its list."));
+  }
+
   function wifiBlock(s) {
     const w = s.wifi;
     if (!w) return h("p", { class: "muted" }, "Loading...");
@@ -66,11 +77,13 @@ export function createNetworks(ctx) {
         : "No networks found. Move closer to the router, or type the name below.") : null,
       r && r.saved.length ? [h("p", { class: "muted small" }, "Saved on this machine"), h("div", { class: "netlist" }, r.saved.map((ssid) => networkRow({ ssid, security: "Saved", current: ssid === r.current })))] : null,
       h("div", { class: "formgrid" }, name, pass),
-      h("div", { class: "row" }, h("button", { class: "btn primary", disabled: draft.joining || draft.scanning, onclick: join }, draft.joining ? "Joining..." : "Join this network")),
+      h("div", { class: "row" },
+        h("button", { class: "btn primary", disabled: draft.joining || draft.scanning, onclick: () => join(true) }, draft.joining ? "Joining..." : "Join and scan"),
+        h("button", { class: "btn", disabled: draft.joining || draft.scanning, onclick: () => join(false) }, "Join only")),
       draft.error ? h("div", { class: "callout bad" }, draft.error) : null,
       draft.outcome && !draft.outcome.ready ? h("div", { class: "callout bad" }, h("p", {}, `Joined ${draft.outcome.connected}, but netScan cannot scan it yet: ${draft.outcome.problem}`),
         h("p", { class: "small" }, "Switch on \"Work on whichever network I am connected to\" above, then press Re-detect network under Maintenance.")) : null,
-      draft.outcome && draft.outcome.ready ? h("p", { class: "muted" }, `Connected to ${draft.outcome.connected}. Run a scan from the Devices tab.`) : null,
+      draft.outcome && draft.outcome.ready ? h("p", { class: "muted" }, draft.outcome.job ? `Connected to ${draft.outcome.connected}. The scan is running; the devices appear on the Devices tab.` : `Connected to ${draft.outcome.connected}. Run a scan from the Devices tab.`) : null,
       h("p", { class: "muted small" }, "The password is sent to this machine's own Wi-Fi settings and is not kept by netScan. Only join networks you have permission to use."));
   }
 
@@ -78,7 +91,7 @@ export function createNetworks(ctx) {
     const s = state.status;
     clear(root).append(h("h2", {}, "Networks"));
     if (!s) { root.append(h("p", { class: "muted" }, "Loading...")); return; }
-    root.append(scopeBlock({ ...s, active_services_running: Object.values(s.services || {}).some((v) => v.running) }), h("h3", { class: "muted" }, "Wi-Fi"), wifiBlock(s));
+    root.append(scopeBlock({ ...s, active_services_running: Object.values(s.services || {}).some((v) => v.running) }), seenBlock(s), h("h3", { class: "muted" }, "Wi-Fi"), wifiBlock(s));
   }
 
   // the card keeps its own element so a typed password or a picked network survives the dashboard's periodic refresh
